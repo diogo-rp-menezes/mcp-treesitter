@@ -13,8 +13,10 @@ import {
   FileJson,
   Sparkles,
   ExternalLink,
+  BarChart2,
 } from 'lucide-react';
 import { ASTNode } from '../types';
+import { ASTD3Chart } from './ASTD3Chart';
 
 interface ASTExplorerViewProps {
   ast: ASTNode | null;
@@ -55,8 +57,20 @@ export function ASTExplorerView({
   const [copiedNode, setCopiedNode] = useState(false);
   const [forceExpand, setForceExpand] = useState<boolean | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [showD3Chart, setShowD3Chart] = useState(true);
+  const [selectedTypeFilter, setSelectedTypeFilter] = useState<string | null>(null);
 
   const totalASTNodes = useMemo(() => countNodes(ast), [ast]);
+
+  const handleSelectNodeTypeFromChart = (type: string) => {
+    if (selectedTypeFilter === type) {
+      setSelectedTypeFilter(null);
+      setSearchTerm('');
+    } else {
+      setSelectedTypeFilter(type);
+      setSearchTerm(type);
+    }
+  };
 
   // Export Full AST as JSON file
   const handleExportFullAST = () => {
@@ -214,6 +228,20 @@ export function ASTExplorerView({
             </button>
           </div>
 
+          {/* D3 Distribution Chart Toggle Button */}
+          <button
+            onClick={() => setShowD3Chart(!showD3Chart)}
+            className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition border shadow-xs ${
+              showD3Chart
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-slate-200'
+            }`}
+            title="Alternar visualização da distribuição de tipos de nós com D3"
+          >
+            <BarChart2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Gráfico D3</span>
+          </button>
+
           {/* EXPORT AST JSON BUTTON */}
           <button
             onClick={handleExportFullAST}
@@ -226,6 +254,16 @@ export function ASTExplorerView({
           </button>
         </div>
       </div>
+
+      {/* D3 Node Distribution Chart Panel */}
+      {showD3Chart && ast && (
+        <ASTD3Chart
+          ast={ast}
+          selectedType={selectedTypeFilter}
+          onSelectNodeType={handleSelectNodeTypeFromChart}
+          onClose={() => setShowD3Chart(false)}
+        />
+      )}
 
       {/* Main Split: Tree + Node Detail */}
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
