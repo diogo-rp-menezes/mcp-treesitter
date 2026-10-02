@@ -38,6 +38,9 @@ export function MCPConsoleView({
   const [formRow, setFormRow] = useState(0);
   const [formCol, setFormCol] = useState(0);
   const [formThreshold, setFormThreshold] = useState(0.5);
+  const [formRegisterName, setFormRegisterName] = useState('novo-projeto');
+  const [formRegisterPath, setFormRegisterPath] = useState('/workspace/novo-projeto');
+  const [formRegisterDesc, setFormRegisterDesc] = useState('Projeto isolado');
 
   const selectedToolObj = mcpTools.find((t) => t.name === selectedTool);
 
@@ -59,7 +62,11 @@ export function MCPConsoleView({
         language,
       };
 
-      if (selectedTool === 'run_query') {
+      if (selectedTool === 'register_project_tool') {
+        args.name = formRegisterName;
+        args.path = formRegisterPath;
+        args.description = formRegisterDesc;
+      } else if (selectedTool === 'run_query') {
         args.query = formQuery;
       } else if (selectedTool === 'get_node_at_position') {
         args.row = Number(formRow);
@@ -214,6 +221,41 @@ export function MCPConsoleView({
                       type="number"
                       value={formCol}
                       onChange={(e) => setFormCol(Number(e.target.value))}
+                      className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-200 text-xs"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {selectedTool === 'register_project_tool' && (
+                <div className="space-y-2 border-t border-slate-800 pt-2">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Nome do Projeto:</label>
+                    <input
+                      type="text"
+                      value={formRegisterName}
+                      onChange={(e) => {
+                        setFormRegisterName(e.target.value);
+                        setFormRegisterPath(`/workspace/${e.target.value.toLowerCase()}`);
+                      }}
+                      className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-200 text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Caminho Raiz Isolado (Path):</label>
+                    <input
+                      type="text"
+                      value={formRegisterPath}
+                      onChange={(e) => setFormRegisterPath(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-200 text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Descrição:</label>
+                    <input
+                      type="text"
+                      value={formRegisterDesc}
+                      onChange={(e) => setFormRegisterDesc(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-200 text-xs"
                     />
                   </div>

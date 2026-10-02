@@ -59,6 +59,41 @@ export interface ProjectInfo {
   fileCount: number;
 }
 
+export interface ProjectOverview {
+  name: string;
+  path: string;
+  description?: string;
+  fileCount: number;
+  totalLines: number;
+  totalBytes: number;
+  languages: Array<{ language: string; count: number; percentage: number }>;
+  lastModified: string;
+  totalFunctions: number;
+  totalClasses: number;
+  isIsolated: boolean;
+}
+
+export interface GitCommitInfo {
+  hash: string;
+  author: string;
+  relativeDate: string;
+  date: string;
+  message: string;
+}
+
+export interface GitRepoStatus {
+  isGitRepo: boolean;
+  branch: string | null;
+  uncommittedCount: number;
+  stagedCount: number;
+  modifiedCount: number;
+  untrackedCount: number;
+  lastCommit: GitCommitInfo | null;
+  remoteUrl: string | null;
+  statusText: string;
+  repoPath: string;
+}
+
 export interface PresetSnippet {
   name: string;
   language: string;

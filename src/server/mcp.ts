@@ -147,6 +147,16 @@ export const MCP_TOOLS_METADATA = [
       },
     },
   },
+  {
+    name: 'audit_project_isolation',
+    description: 'Audit workspace isolation compliance for a project to verify no file leaks or cross-contamination.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name to audit' },
+      },
+    },
+  },
 ];
 
 export const MCP_PROMPTS_METADATA = [
@@ -370,6 +380,13 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
         security: { max_file_size_mb: args.max_file_size_mb ?? 10 },
         log_level: args.log_level || 'INFO',
       };
+    }
+
+    case 'audit_project_isolation': {
+      const proj = args.project || 'tree-sitter-core';
+      const report = projectStore.auditIsolation(proj);
+      if (!report) throw new Error(`Project '${proj}' not found`);
+      return report;
     }
 
     default:

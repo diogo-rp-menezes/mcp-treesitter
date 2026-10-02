@@ -1,5 +1,7 @@
 import { Project, ProjectFile } from './types';
-import { detectLanguage } from './parser';
+import { detectLanguage, parseSourceToAST, extractSymbolsFromAST } from './parser';
+import { calculateComplexity } from './complexity';
+import { validateAndResolvePath, normalizePath, auditProjectIsolation } from './isolation';
 
 const projects = new Map<string, Project>();
 
@@ -230,14 +232,124 @@ export const projectStore = {
     }));
   },
 
+  getProjectOverview(): Array<{
+    name: string;
+    path: string;
+    description?: string;
+    fileCount: number;
+    totalLines: number;
+    totalBytes: number;
+    languages: Array<{ language: string; count: number; percentage: number }>;
+    lastModified: string;
+    totalFunctions: number;
+    totalClasses: number;
+    isIsolated: boolean;
+  }> {
+    return Array.from(projects.values()).map((p) => {
+      let totalLines = 0;
+      let totalBytes = 0;
+      let latestModified = '';
+      const langCounts: Record<string, number> = {};
+      let totalFunctions = 0;
+      let totalClasses = 0;
+
+      for (const file of p.files.values()) {
+        const lines = file.content.split('\n').length;
+        totalLines += lines;
+        totalBytes += file.sizeBytes || 0;
+        if (!latestModified || file.lastModified > latestModified) {
+          latestModified = file.lastModified;
+        }
+        langCounts[file.language] = (langCounts[file.language] || 0) + 1;
+
+        try {
+          const ast = parseSourceToAST(file.content, file.language);
+          const syms = extractSymbolsFromAST(ast, file.language);
+          totalFunctions += syms.functions?.length || 0;
+          totalClasses += syms.classes?.length || 0;
+        } catch {
+          // ignore parsing edge cases
+        }
+      }
+
+      const totalFiles = p.files.size;
+      const languages = Object.entries(langCounts).map(([language, count]) => ({
+        language,
+        count,
+        percentage: totalFiles > 0 ? Math.round((count / totalFiles) * 100) : 0,
+      }));
+
+      return {
+        name: p.name,
+        path: p.path,
+        description: p.description,
+        fileCount: totalFiles,
+        totalLines,
+        totalBytes,
+        languages,
+        lastModified: latestModified || new Date().toISOString(),
+        totalFunctions,
+        totalClasses,
+        isIsolated: true,
+      };
+    });
+  },
+
+  getProjectFileStats(projectName: string): Array<{
+    fileName: string;
+    language: string;
+    lines: number;
+    codeLines: number;
+    commentLines: number;
+    complexity: number;
+    functions: number;
+    classes: number;
+  }> {
+    const p = projects.get(projectName);
+    if (!p) return [];
+
+    return Array.from(p.files.values()).map((file) => {
+      try {
+        const ast = parseSourceToAST(file.content, file.language);
+        const metrics = calculateComplexity(file.content, ast);
+        const syms = extractSymbolsFromAST(ast, file.language);
+        return {
+          fileName: file.path,
+          language: file.language,
+          lines: metrics.lineCount,
+          codeLines: metrics.codeLines,
+          commentLines: metrics.commentLines,
+          complexity: metrics.cyclomaticComplexity,
+          functions: syms.functions?.length || 0,
+          classes: syms.classes?.length || 0,
+        };
+      } catch {
+        const lines = file.content.split('\n').length;
+        return {
+          fileName: file.path,
+          language: file.language,
+          lines,
+          codeLines: lines,
+          commentLines: 0,
+          complexity: 1,
+          functions: 0,
+          classes: 0,
+        };
+      }
+    });
+  },
+
   getProject(name: string): Project | undefined {
     return projects.get(name);
   },
 
   createProject(name: string, path?: string, description?: string): Project {
+    const rawPath = path || `/projects/${name}`;
+    const cleanPath = normalizePath(rawPath);
+
     const proj: Project = {
       name,
-      path: path || `/projects/${name}`,
+      path: cleanPath,
       description: description || `Project ${name}`,
       files: new Map(),
     };
@@ -269,7 +381,11 @@ export const projectStore = {
 
   getFile(projectName: string, filePath: string): ProjectFile | undefined {
     const p = projects.get(projectName);
-    return p?.files.get(filePath);
+    if (!p) return undefined;
+
+    // Validate path boundary
+    const { relativePath } = validateAndResolvePath(p, filePath);
+    return p.files.get(relativePath);
   },
 
   saveFile(projectName: string, filePath: string, content: string): ProjectFile {
@@ -277,12 +393,24 @@ export const projectStore = {
     if (!p) {
       p = this.createProject(projectName);
     }
-    return addFileToProject(p, filePath, content);
+
+    // Validate path boundary
+    const { relativePath } = validateAndResolvePath(p, filePath);
+    return addFileToProject(p, relativePath, content);
   },
 
   deleteFile(projectName: string, filePath: string): boolean {
     const p = projects.get(projectName);
     if (!p) return false;
-    return p.files.delete(filePath);
+
+    // Validate path boundary
+    const { relativePath } = validateAndResolvePath(p, filePath);
+    return p.files.delete(relativePath);
+  },
+
+  auditIsolation(projectName: string) {
+    const p = projects.get(projectName);
+    if (!p) return null;
+    return auditProjectIsolation(p);
   },
 };

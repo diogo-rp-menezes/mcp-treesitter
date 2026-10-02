@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Network, Save, Copy, Check, Sparkles, Server, Terminal, ExternalLink } from 'lucide-react';
+import { Network, Save, Copy, Check, Sparkles, Server, Terminal, HardDrive } from 'lucide-react';
 import { ProjectInfo, PRESET_SNIPPETS } from '../types';
 
 interface HeaderProps {
@@ -28,6 +28,7 @@ export function Header({
   onOpenMCPModal,
 }: HeaderProps) {
   const [showPresets, setShowPresets] = useState(false);
+  const currentProject = projects.find((p) => p.name === activeProject);
 
   return (
     <header className="h-14 border-b border-slate-800 bg-[#0b0f19] px-4 flex items-center justify-between shrink-0 select-none">
@@ -42,7 +43,7 @@ export function Header({
         </span>
       </div>
 
-      {/* Zone 2: Breadcrumbs & Project/File Navigation */}
+      {/* Zone 2: Breadcrumbs & Project/File Navigation with Isolated Path */}
       <div className="hidden md:flex items-center gap-2 text-xs">
         <span className="text-slate-400 font-medium">Projeto:</span>
         <select
@@ -52,10 +53,19 @@ export function Header({
         >
           {projects.map((p) => (
             <option key={p.name} value={p.name}>
-              {p.name} ({p.fileCount} arq.)
+              {p.name} — {p.path}
             </option>
           ))}
         </select>
+
+        {currentProject && (
+          <span
+            className="text-[10px] text-cyan-400/80 font-mono bg-slate-950 px-2 py-0.5 rounded border border-slate-800 truncate max-w-48 hidden lg:inline"
+            title={`Caminho isolado do projeto: ${currentProject.path}`}
+          >
+            {currentProject.path}
+          </span>
+        )}
 
         <span className="text-slate-600">/</span>
 

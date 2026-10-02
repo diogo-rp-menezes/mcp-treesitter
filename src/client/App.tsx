@@ -353,6 +353,7 @@ export default function App() {
                 language={language}
                 filename={activeFile}
                 selectedNode={selectedNode}
+                symbols={symbols}
                 onChangeCode={setCode}
                 onCopyCode={() => showToast('Código copiado!')}
               />
@@ -370,8 +371,12 @@ export default function App() {
                 ast={ast}
                 selectedNode={selectedNode}
                 maxDepth={maxAstDepth}
+                filename={activeFile}
+                activeProject={activeProject}
+                language={language}
                 onChangeMaxDepth={setMaxAstDepth}
                 onSelectNode={(node) => setSelectedNode(node)}
+                onToast={showToast}
               />
             )}
 
@@ -440,6 +445,7 @@ export default function App() {
                   setActiveTab('ast');
                 }}
                 onRefreshProjects={fetchProjects}
+                onNavigateToAST={() => setActiveTab('ast')}
               />
             )}
           </div>

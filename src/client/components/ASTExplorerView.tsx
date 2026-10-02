@@ -9,6 +9,10 @@ import {
   Minimize2,
   Copy,
   Check,
+  Download,
+  FileJson,
+  Sparkles,
+  ExternalLink,
 } from 'lucide-react';
 import { ASTNode } from '../types';
 
@@ -16,20 +20,128 @@ interface ASTExplorerViewProps {
   ast: ASTNode | null;
   selectedNode: ASTNode | null;
   maxDepth: number;
+  filename?: string;
+  activeProject?: string;
+  language?: string;
   onChangeMaxDepth: (depth: number) => void;
   onSelectNode: (node: ASTNode) => void;
+  onToast?: (msg: string) => void;
+}
+
+// Helper to count all nodes recursively in the AST
+function countNodes(node: ASTNode | null): number {
+  if (!node) return 0;
+  let count = 1;
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      count += countNodes(child);
+    }
+  }
+  return count;
 }
 
 export function ASTExplorerView({
   ast,
   selectedNode,
   maxDepth,
+  filename = 'source.py',
+  activeProject = 'active-project',
+  language = 'python',
   onChangeMaxDepth,
   onSelectNode,
+  onToast,
 }: ASTExplorerViewProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [copiedNode, setCopiedNode] = useState(false);
   const [forceExpand, setForceExpand] = useState<boolean | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  const totalASTNodes = useMemo(() => countNodes(ast), [ast]);
+
+  // Export Full AST as JSON file
+  const handleExportFullAST = () => {
+    if (!ast) return;
+    setExporting(true);
+
+    try {
+      const cleanName = filename.split('/').pop() || 'source.py';
+      const sanitizedFilename = cleanName.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+      const exportData = {
+        $schema: 'https://tree-sitter.github.io/schema/ast.json',
+        generator: 'Tree-sitter MCP Server v0.7.0',
+        exportedAt: new Date().toISOString(),
+        metadata: {
+          project: activeProject,
+          file: filename,
+          language: language,
+          totalNodes: totalASTNodes,
+          maxDepthRendered: maxDepth,
+        },
+        ast,
+      };
+
+      const jsonString = JSON.stringify(exportData, null, 2);
+      const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${sanitizedFilename}.ast.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      if (onToast) {
+        onToast(`AST exportada com sucesso: ${sanitizedFilename}.ast.json`);
+      }
+    } catch (err) {
+      console.error('Failed to export AST', err);
+    } finally {
+      setTimeout(() => setExporting(false), 500);
+    }
+  };
+
+  // Export Selected Node as JSON file
+  const handleExportNodeJSON = () => {
+    if (!selectedNode) return;
+
+    try {
+      const cleanName = filename.split('/').pop() || 'source.py';
+      const sanitizedFilename = cleanName.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+      const exportData = {
+        $schema: 'https://tree-sitter.github.io/schema/ast-node.json',
+        generator: 'Tree-sitter MCP Server v0.7.0',
+        exportedAt: new Date().toISOString(),
+        metadata: {
+          project: activeProject,
+          file: filename,
+          nodeType: selectedNode.type,
+          nodeField: selectedNode.field,
+          totalChildren: selectedNode.children?.length || 0,
+        },
+        node: selectedNode,
+      };
+
+      const jsonString = JSON.stringify(exportData, null, 2);
+      const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${sanitizedFilename}.${selectedNode.type}.ast.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      if (onToast) {
+        onToast(`Nó [${selectedNode.type}] exportado com sucesso!`);
+      }
+    } catch (err) {
+      console.error('Failed to export node', err);
+    }
+  };
 
   const handleCopyNodeJSON = () => {
     if (!selectedNode) return;
@@ -45,24 +157,29 @@ export function ASTExplorerView({
         <div className="flex items-center gap-2">
           <Layers className="w-4 h-4 text-cyan-400" />
           <span className="font-semibold text-slate-200">Árvore Sintática Abstrata (AST)</span>
+          {ast && (
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-cyan-300 font-mono hidden sm:inline">
+              {totalASTNodes} nós
+            </span>
+          )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
           {/* Search filter in AST */}
-          <div className="relative w-44">
+          <div className="relative w-36 sm:w-44">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Buscar nó por tipo..."
+              placeholder="Buscar nó..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700 rounded pl-7 pr-2 py-1 text-slate-200 text-xs focus:outline-none focus:border-cyan-500"
+              className="w-full bg-slate-900 border border-slate-700 rounded pl-7 pr-2 py-1 text-slate-200 text-xs focus:outline-none focus:border-cyan-500 font-mono"
             />
           </div>
 
           {/* Depth control */}
-          <div className="flex items-center gap-1.5 text-slate-400 text-xs">
-            <span className="hidden sm:inline">Nível:</span>
+          <div className="flex items-center gap-1 text-slate-400 text-xs">
+            <span className="hidden md:inline">Nível:</span>
             <select
               value={maxDepth}
               onChange={(e) => {
@@ -96,6 +213,17 @@ export function ASTExplorerView({
               <Minimize2 className="w-3.5 h-3.5" />
             </button>
           </div>
+
+          {/* EXPORT AST JSON BUTTON */}
+          <button
+            onClick={handleExportFullAST}
+            disabled={!ast || exporting}
+            className="px-2.5 py-1 bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-300 border border-cyan-500/40 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition disabled:opacity-40 shadow-xs"
+            title={`Exportar AST completa de '${filename}' como arquivo .json`}
+          >
+            <Download className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden sm:inline">Exportar AST (.json)</span>
+          </button>
         </div>
       </div>
 
@@ -109,31 +237,44 @@ export function ASTExplorerView({
               depth={0}
               maxDepth={maxDepth}
               forceExpand={forceExpand}
-              searchTerm={searchTerm.toLowerCase()}
+              searchTerm={searchTerm}
               selectedNode={selectedNode}
               onSelectNode={onSelectNode}
             />
           ) : (
-            <div className="text-slate-500 italic p-6 text-center">Gerando árvore AST...</div>
+            <div className="text-slate-500 italic p-6 text-center">
+              Nenhuma árvore sintática disponível para este código.
+            </div>
           )}
         </div>
 
-        {/* Right Side: Node Inspector Card */}
-        <div className="w-full md:w-80 border-t md:border-t-0 md:border-l border-slate-800 bg-[#0d131f] p-3 text-xs overflow-auto flex flex-col justify-between shrink-0">
-          <div>
-            <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-2">
-              <h4 className="font-semibold text-slate-200 flex items-center gap-1.5">
+        {/* Right Side: Selected Node Details Inspector */}
+        <div className="w-full md:w-80 border-t md:border-t-0 md:border-l border-slate-800 bg-[#0d1322] p-4 flex flex-col overflow-y-auto shrink-0 text-xs">
+          <div className="flex-1 space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <div className="flex items-center gap-1.5 text-slate-200 font-semibold">
                 <Info className="w-4 h-4 text-cyan-400" />
-                Inspetor do Nó
-              </h4>
+                <span>Propriedades do Nó</span>
+              </div>
+
               {selectedNode && (
-                <button
-                  onClick={handleCopyNodeJSON}
-                  className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 text-[11px] flex items-center gap-1 transition"
-                >
-                  {copiedNode ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                  {copiedNode ? 'Copiado!' : 'Copiar JSON'}
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={handleExportNodeJSON}
+                    className="p-1 hover:bg-slate-800 text-slate-400 hover:text-cyan-300 rounded border border-slate-850 transition"
+                    title="Baixar nó selecionado como JSON"
+                  >
+                    <Download className="w-3 h-3" />
+                  </button>
+
+                  <button
+                    onClick={handleCopyNodeJSON}
+                    className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 text-[11px] flex items-center gap-1 transition"
+                  >
+                    {copiedNode ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    {copiedNode ? 'Copiado!' : 'Copiar'}
+                  </button>
+                </div>
               )}
             </div>
 
@@ -280,24 +421,34 @@ function TreeNode({
           <span className="w-3.5" />
         )}
 
-        {node.field && <span className="text-amber-400 font-semibold">{node.field}:</span>}
-
-        <span className={`px-1.5 py-0.5 rounded text-[11px] border font-medium ${badgeColor}`}>
-          ({node.type})
+        {/* Node type pill */}
+        <span
+          className={`font-semibold px-1.5 py-0.2 rounded border text-[11px] ${badgeColor}`}
+        >
+          {node.type}
         </span>
 
-        <span className="text-[10px] text-slate-500">
-          [{node.startPoint.row + 1}:{node.startPoint.column}]
-        </span>
-
-        {node.text && node.text.length <= 30 && !hasChildren && (
-          <span className="text-emerald-300 text-[11px] truncate bg-slate-950/80 px-1.5 py-0.5 rounded border border-slate-850">
-            "{node.text.trim()}"
+        {/* Field name if present */}
+        {node.field && (
+          <span className="text-amber-300 text-[11px]">
+            {node.field}:
           </span>
         )}
+
+        {/* Node text preview if leaf/identifier */}
+        {node.text && node.children.length === 0 && (
+          <span className="text-emerald-300 text-[11px] truncate max-w-xs opacity-90">
+            "{node.text}"
+          </span>
+        )}
+
+        {/* Line Coordinates */}
+        <span className="text-slate-600 text-[10px] ml-auto">
+          [{node.startPoint.row + 1}:{node.startPoint.column}]
+        </span>
       </div>
 
-      {!collapsed && hasChildren && (
+      {hasChildren && !collapsed && (
         <div className="space-y-0.5">
           {node.children.map((child) => (
             <TreeNode
