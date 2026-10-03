@@ -31,4 +31,9 @@ describe('GitHub Repository URL Parser', () => {
     expect(parseGitHubRepo('https://gitlab.com/user/project')).toBeNull();
     expect(parseGitHubRepo('https://google.com')).toBeNull();
   });
+
+  it('correctly extracts owner and repo without trailing query strings or hash', () => {
+    const res = parseGitHubRepo('https://github.com/expressjs/express/tree/master/lib');
+    expect(res).toEqual({ owner: 'expressjs', repo: 'express' });
+  });
 });

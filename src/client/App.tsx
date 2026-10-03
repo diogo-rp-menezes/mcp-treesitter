@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Header } from './components/Header';
 import { Sidebar, NavTab } from './components/Sidebar';
+import { VSCodeTitleBar } from './components/VSCodeTitleBar';
+import { VSCodeActivityBar } from './components/VSCodeActivityBar';
+import { VSCodePrimarySideBar } from './components/VSCodePrimarySideBar';
+import { VSCodeTabBar } from './components/VSCodeTabBar';
+import { VSCodeStatusBar } from './components/VSCodeStatusBar';
 import { CodeEditor } from './components/CodeEditor';
 import { ASTExplorerView } from './components/ASTExplorerView';
 import { QueryStudioView } from './components/QueryStudioView';
@@ -9,8 +14,10 @@ import { ComplexityView } from './components/ComplexityView';
 import { SimilarityView } from './components/SimilarityView';
 import { MCPConsoleView } from './components/MCPConsoleView';
 import { ProjectManagerView } from './components/ProjectManagerView';
+import { DatabaseView } from './components/DatabaseView';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { MCPConnectModal } from './components/MCPConnectModal';
+import { TreeSitterInspectorModal } from './components/TreeSitterInspectorModal';
 import { Toast } from './components/Toast';
 import {
   ASTNode,
@@ -27,15 +34,45 @@ export default function App() {
 
   // Project state
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [activeProject, setActiveProject] = useState<string>('tree-sitter-core');
+  const [activeProject, setActiveProject] = useState<string>('');
   const [projectFiles, setProjectFiles] = useState<string[]>([]);
-  const [activeFile, setActiveFile] = useState<string>('analyzer.py');
+  const [activeFile, setActiveFile] = useState<string>('');
+  const [openFiles, setOpenFiles] = useState<string[]>([]);
+
+  // Open a file tab explicitly
+  const handleOpenFile = useCallback((filePath: string) => {
+    if (!filePath) return;
+    setActiveFile(filePath);
+    setOpenFiles((prev) => (prev.includes(filePath) ? prev : [...prev, filePath]));
+  }, []);
+
+  // Close an open file tab
+  const handleCloseFile = useCallback((filePath: string) => {
+    setOpenFiles((prev) => {
+      const updated = prev.filter((f) => f !== filePath);
+      if (activeFile === filePath) {
+        if (updated.length > 0) {
+          const nextFile = updated[updated.length - 1];
+          setActiveFile(nextFile);
+        } else {
+          setActiveFile('');
+          setCode('');
+          setOriginalCode('');
+          setAst(null);
+        }
+      }
+      return updated;
+    });
+  }, [activeFile]);
 
   // Code editor state
   const [code, setCode] = useState<string>('');
+  const [originalCode, setOriginalCode] = useState<string>('');
   const [language, setLanguage] = useState<string>('python');
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const isCodeDirty = useMemo(() => code !== originalCode && originalCode !== '', [code, originalCode]);
 
   // AST state
   const [ast, setAst] = useState<ASTNode | null>(null);
@@ -72,6 +109,7 @@ export default function App() {
   // UI helpers
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isMCPModalOpen, setIsMCPModalOpen] = useState<boolean>(false);
+  const [treeSitterModalTool, setTreeSitterModalTool] = useState<NavTab | null>(null);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -87,6 +125,11 @@ export default function App() {
   // Load project files when active project changes
   useEffect(() => {
     if (activeProject) {
+      setOpenFiles([]);
+      setActiveFile('');
+      setCode('');
+      setOriginalCode('');
+      setAst(null);
       fetchFiles(activeProject);
     }
   }, [activeProject]);
@@ -116,8 +159,20 @@ export default function App() {
   async function fetchProjects() {
     try {
       const res = await fetch('/api/projects');
-      const data = await res.json();
+      const data: ProjectInfo[] = await res.json();
       setProjects(data);
+      if (Array.isArray(data) && data.length > 0) {
+        if (!activeProject || !data.some((p) => p.name === activeProject)) {
+          setActiveProject(data[0].name);
+        }
+      } else {
+        setActiveProject('');
+        setProjectFiles([]);
+        setActiveFile('');
+        setCode('');
+        setOriginalCode('');
+        setAst(null);
+      }
     } catch (err) {
       console.error('Failed to load projects', err);
     }
@@ -158,9 +213,6 @@ export default function App() {
       const res = await fetch(`/api/projects/${encodeURIComponent(projName)}/files`);
       const files: string[] = await res.json();
       setProjectFiles(files);
-      if (files.length > 0 && !files.includes(activeFile)) {
-        setActiveFile(files[0]);
-      }
     } catch (err) {
       console.error('Failed to load files', err);
     }
@@ -176,11 +228,29 @@ export default function App() {
       if (!res.ok) throw new Error('Could not load file');
       const fileData = await res.json();
       setCode(fileData.content || '');
+      setOriginalCode(fileData.content || '');
       setLanguage(fileData.language || 'python');
     } catch (err: any) {
       setErrorMsg(err.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleSaveActiveFile() {
+    if (!activeProject || !activeFile) return;
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(activeProject)}/file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: activeFile, content: code }),
+      });
+      if (!res.ok) throw new Error('Falha ao salvar arquivo no banco SQLite');
+      setOriginalCode(code);
+      showToast(`Arquivo '${activeFile}' salvo com sucesso no banco de dados SQLite!`);
+      fetchFiles(activeProject);
+    } catch (err: any) {
+      showToast(`Erro ao salvar: ${err.message}`);
     }
   }
 
@@ -325,7 +395,7 @@ export default function App() {
   function handleLoadPreset(preset: PresetSnippet) {
     setCode(preset.code);
     setLanguage(preset.language);
-    setActiveFile(preset.filename);
+    handleOpenFile(preset.filename);
     setSelectedNode(null);
     showToast(`Exemplo carregado: ${preset.name}`);
   }
@@ -335,120 +405,93 @@ export default function App() {
   }, [symbols]);
 
   return (
-    <div className="flex flex-col h-screen bg-[#090d16] text-slate-100 overflow-hidden font-sans">
-      {/* Header */}
-      <Header
+    <div className="flex flex-col h-screen w-screen bg-[#1e1e1e] text-slate-100 overflow-hidden font-sans select-none antialiased">
+      {/* 1. VS Code Top Title Bar */}
+      <VSCodeTitleBar
         activeProject={activeProject}
         activeFile={activeFile}
         language={language}
         projects={projects}
         projectFiles={projectFiles}
+        isDirty={isCodeDirty}
         onSelectProject={setActiveProject}
-        onSelectFile={setActiveFile}
-        onSaveFile={handleSaveCurrentFile}
+        onSelectFile={handleOpenFile}
+        onSaveFile={handleSaveActiveFile}
         onLoadPreset={handleLoadPreset}
         onOpenMCPModal={() => setIsMCPModalOpen(true)}
       />
 
-      {/* Breadcrumb Navigation Bar */}
-      <BreadcrumbBar
-        activeProject={activeProject}
-        activeFile={activeFile}
-        projectPath={projects.find((p) => p.name === activeProject)?.path}
-        projectFiles={projectFiles}
-        language={language}
-        projects={projects}
-        onSelectProject={setActiveProject}
-        onSelectFile={setActiveFile}
-        onOpenProjectManager={() => setActiveTab('projects')}
-        onToast={showToast}
-      />
-
-      {/* Main Workspace Frame */}
+      {/* 2. Main Desktop Work Area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Navigation Sidebar */}
-        <Sidebar
+        {/* Activity Bar (Left narrow 48px strip) */}
+        <VSCodeActivityBar
           activeTab={activeTab}
           onSelectTab={setActiveTab}
           symbolsCount={totalSymbolsCount}
+          onOpenMCPModal={() => setIsMCPModalOpen(true)}
         />
 
-        {/* Content Body */}
-        <div className="flex-1 flex overflow-hidden">
-          {/* Shared Left Pane: Code Editor (when not in standalone managers) */}
-          {activeTab !== 'projects' && activeTab !== 'mcp' && (
-            <div className="w-1/2 border-r border-slate-800 flex flex-col h-full overflow-hidden">
-              <CodeEditor
-                code={code}
-                language={language}
-                filename={activeFile}
-                selectedNode={selectedNode}
-                symbols={symbols}
-                onChangeCode={setCode}
-                onCopyCode={() => showToast('Código copiado!')}
-              />
-            </div>
-          )}
+        {/* Primary Side Bar (Collapsible panel 240px) */}
+        <VSCodePrimarySideBar
+          activeTab={activeTab}
+          projects={projects}
+          activeProject={activeProject}
+          projectFiles={projectFiles}
+          activeFile={activeFile}
+          language={language}
+          symbols={symbols}
+          templates={templates}
+          mcpTools={mcpTools}
+          onSelectProject={setActiveProject}
+          onSelectFile={handleOpenFile}
+          onSelectTab={setActiveTab}
+          onRefreshProjects={fetchProjects}
+          onOpenProjectManager={() => setActiveTab('projects')}
+        />
 
-          {/* Right Pane: Tool-Specific Interactive Views */}
-          <div
-            className={`${
-              activeTab === 'projects' || activeTab === 'mcp' ? 'w-full' : 'w-1/2'
-            } flex flex-col h-full overflow-hidden`}
-          >
-            {activeTab === 'ast' && (
-              <ASTExplorerView
-                ast={ast}
-                selectedNode={selectedNode}
-                maxDepth={maxAstDepth}
-                filename={activeFile}
+        {/* Central Workspace Content Pane */}
+        <div className="flex-1 flex flex-col overflow-hidden bg-[#1e1e1e]">
+          {/* Editor Tab Bar (File Documents Only) */}
+          <VSCodeTabBar
+            openFiles={openFiles}
+            activeFile={activeFile}
+            language={language}
+            isDirty={isCodeDirty}
+            onSelectFile={handleOpenFile}
+            onCloseFile={handleCloseFile}
+            onSaveFile={handleSaveActiveFile}
+          />
+
+          {/* Breadcrumbs Navigation Bar */}
+          <BreadcrumbBar
+            activeProject={activeProject}
+            activeFile={activeFile}
+            projectPath={projects.find((p) => p.name === activeProject)?.path}
+            projectFiles={projectFiles}
+            language={language}
+            projects={projects}
+            onSelectProject={setActiveProject}
+            onSelectFile={handleOpenFile}
+            onOpenProjectManager={() => setActiveTab('projects')}
+            onToast={showToast}
+          />
+
+          {/* Main Editor & Full Workspace Content Area */}
+          <div className="flex-1 flex overflow-hidden">
+            {activeTab === 'projects' ? (
+              <ProjectManagerView
+                projects={projects}
                 activeProject={activeProject}
-                language={language}
-                onChangeMaxDepth={setMaxAstDepth}
-                onSelectNode={(node) => setSelectedNode(node)}
-                onToast={showToast}
-              />
-            )}
-
-            {activeTab === 'query' && (
-              <QueryStudioView
-                language={language}
-                queryInput={queryInput}
-                queryMatches={queryMatches}
-                templates={templates}
-                selectedTemplate={selectedTemplate}
-                loading={loading}
-                errorMsg={errorMsg}
-                onChangeQuery={setQueryInput}
-                onSelectTemplate={handleSelectTemplate}
-                onRunQuery={handleRunQuery}
-              />
-            )}
-
-            {activeTab === 'symbols' && (
-              <SymbolsView
-                symbols={symbols}
-                onJumpToLine={(line) => {
-                  showToast(`Linha ${line + 1} selecionada`);
+                projectFiles={projectFiles}
+                activeFile={activeFile}
+                onSelectProject={setActiveProject}
+                onSelectFile={(file) => {
+                  handleOpenFile(file);
                 }}
+                onRefreshProjects={fetchProjects}
+                onNavigateToAST={() => setTreeSitterModalTool('ast')}
               />
-            )}
-
-            {activeTab === 'complexity' && <ComplexityView complexity={complexity} />}
-
-            {activeTab === 'similarity' && (
-              <SimilarityView
-                similaritySnippet={similaritySnippet}
-                similarityResults={similarityResults}
-                similarityThreshold={similarityThreshold}
-                loading={loading}
-                onChangeSnippet={setSimilaritySnippet}
-                onChangeThreshold={setSimilarityThreshold}
-                onRunSimilarity={handleFindSimilar}
-              />
-            )}
-
-            {activeTab === 'mcp' && (
+            ) : activeTab === 'mcp' ? (
               <MCPConsoleView
                 mcpTools={mcpTools}
                 selectedTool={selectedMcpTool}
@@ -461,26 +504,77 @@ export default function App() {
                 onSelectTool={setSelectedMcpTool}
                 onExecuteTool={handleExecuteMCPTool}
               />
-            )}
-
-            {activeTab === 'projects' && (
-              <ProjectManagerView
-                projects={projects}
-                activeProject={activeProject}
-                projectFiles={projectFiles}
-                activeFile={activeFile}
-                onSelectProject={setActiveProject}
-                onSelectFile={(file) => {
-                  setActiveFile(file);
-                  setActiveTab('ast');
-                }}
-                onRefreshProjects={fetchProjects}
-                onNavigateToAST={() => setActiveTab('ast')}
-              />
+            ) : activeTab === 'database' ? (
+              <DatabaseView />
+            ) : (
+              /* Full-Width Monaco Code Editor View */
+              <div className="w-full flex flex-col h-full overflow-hidden bg-[#1e1e1e]">
+                <CodeEditor
+                  code={code}
+                  language={language}
+                  filename={activeFile}
+                  ast={ast}
+                  selectedNode={selectedNode}
+                  symbols={symbols}
+                  isDirty={isCodeDirty}
+                  activeInspector={treeSitterModalTool || 'ast'}
+                  symbolsCount={totalSymbolsCount}
+                  onChangeCode={setCode}
+                  onCopyCode={() => showToast('Código copiado!')}
+                  onSaveCode={handleSaveActiveFile}
+                  onSelectInspector={(tool) => setTreeSitterModalTool(tool)}
+                />
+              </div>
             )}
           </div>
         </div>
       </div>
+
+      {/* Modal Overlay for Tree-sitter Inspector Tools */}
+      <TreeSitterInspectorModal
+        isOpen={treeSitterModalTool !== null}
+        activeTool={treeSitterModalTool}
+        filename={activeFile}
+        language={language}
+        activeProject={activeProject}
+        code={code}
+        ast={ast}
+        selectedNode={selectedNode}
+        maxAstDepth={maxAstDepth}
+        queryInput={queryInput}
+        queryMatches={queryMatches}
+        templates={templates}
+        selectedTemplate={selectedTemplate}
+        symbols={symbols}
+        complexity={complexity}
+        similaritySnippet={similaritySnippet}
+        similarityResults={similarityResults}
+        similarityThreshold={similarityThreshold}
+        loading={loading}
+        errorMsg={errorMsg}
+        onClose={() => setTreeSitterModalTool(null)}
+        onSelectTool={(tool) => setTreeSitterModalTool(tool)}
+        onChangeMaxDepth={setMaxAstDepth}
+        onSelectNode={(node) => setSelectedNode(node)}
+        onChangeQuery={setQueryInput}
+        onSelectTemplate={handleSelectTemplate}
+        onRunQuery={handleRunQuery}
+        onJumpToLine={(line) => showToast(`Linha ${line + 1} selecionada`)}
+        onChangeSimilaritySnippet={setSimilaritySnippet}
+        onChangeSimilarityThreshold={setSimilarityThreshold}
+        onRunSimilarity={handleFindSimilar}
+        onToast={showToast}
+      />
+
+      {/* 3. VS Code Bottom Status Bar */}
+      <VSCodeStatusBar
+        activeProject={activeProject}
+        activeFile={activeFile}
+        language={language}
+        isDirty={isCodeDirty}
+        projectsCount={projects.length}
+        onOpenMCPModal={() => setIsMCPModalOpen(true)}
+      />
 
       {/* Modal: Connect Claude Desktop / Cursor */}
       <MCPConnectModal isOpen={isMCPModalOpen} onClose={() => setIsMCPModalOpen(false)} />

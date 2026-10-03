@@ -11,8 +11,17 @@ import { findSimilarCodeBlocks } from './src/server/similarity';
 import { TEMPLATES, COMMON_NODE_DESCRIPTIONS } from './src/server/templates';
 import { MCP_TOOLS_METADATA, MCP_PROMPTS_METADATA, handleMCPToolCall, handleMCPPrompt } from './src/server/mcp';
 import { ProjectIsolationError } from './src/server/isolation';
-import { getProjectGitStatus, initProjectGitRepo } from './src/server/git';
+import {
+  getProjectGitStatus,
+  initProjectGitRepo,
+  stageGitFiles,
+  unstageGitFiles,
+  commitGitChanges,
+  switchGitBranch,
+  syncProjectFilesToDisk,
+} from './src/server/git';
 import { importGitHubRepository, parseGitHubRepo } from './src/server/github';
+import { sqliteStorage } from './src/server/db';
 
 async function startServer() {
   const app = express();
@@ -26,7 +35,7 @@ async function startServer() {
 
   app.use(
     cors({
-      origin: (origin, callback) => {
+      origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
         if (!origin) return callback(null, true);
         if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
           return callback(null, true);
@@ -114,8 +123,108 @@ async function startServer() {
   app.post('/api/projects/:name/git-init', (req, res) => {
     const proj = projectStore.getProject(req.params.name);
     if (!proj) return res.status(404).json({ error: 'Project not found' });
-    const status = initProjectGitRepo(proj.path);
-    res.json(status);
+    try {
+      // Sync files to disk first so git tracks them
+      const files = Array.from(proj.files.values()).map((f) => ({ path: f.path, content: f.content }));
+      syncProjectFilesToDisk(proj.path, files);
+      const status = initProjectGitRepo(proj.path);
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Sync SQLite project files to disk directory
+  app.post('/api/projects/:name/git-sync', (req, res) => {
+    const proj = projectStore.getProject(req.params.name);
+    if (!proj) return res.status(404).json({ error: 'Project not found' });
+    try {
+      const files = Array.from(proj.files.values()).map((f) => ({ path: f.path, content: f.content }));
+      const result = syncProjectFilesToDisk(proj.path, files);
+      const status = getProjectGitStatus(proj.path);
+      res.json({ ...result, gitStatus: status });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Stage files for Git commit
+  app.post('/api/projects/:name/git-stage', (req, res) => {
+    const proj = projectStore.getProject(req.params.name);
+    if (!proj) return res.status(404).json({ error: 'Project not found' });
+    try {
+      const { files } = req.body;
+      const status = stageGitFiles(proj.path, files);
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Unstage files
+  app.post('/api/projects/:name/git-unstage', (req, res) => {
+    const proj = projectStore.getProject(req.params.name);
+    if (!proj) return res.status(404).json({ error: 'Project not found' });
+    try {
+      const { files } = req.body;
+      const status = unstageGitFiles(proj.path, files);
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Commit changes
+  app.post('/api/projects/:name/git-commit', (req, res) => {
+    const proj = projectStore.getProject(req.params.name);
+    if (!proj) return res.status(404).json({ error: 'Project not found' });
+    try {
+      const { message } = req.body;
+      if (!message) return res.status(400).json({ error: 'Mensagem de commit é obrigatória.' });
+      const status = commitGitChanges(proj.path, message);
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Switch or create branch
+  app.post('/api/projects/:name/git-branch', (req, res) => {
+    const proj = projectStore.getProject(req.params.name);
+    if (!proj) return res.status(404).json({ error: 'Project not found' });
+    try {
+      const { branch, create } = req.body;
+      if (!branch) return res.status(400).json({ error: 'Nome da branch é obrigatório.' });
+      const status = switchGitBranch(proj.path, branch, Boolean(create));
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Export full project bundle as JSON
+  app.get('/api/projects/:name/export', (req, res) => {
+    const proj = projectStore.getProject(req.params.name);
+    if (!proj) return res.status(404).json({ error: 'Project not found' });
+
+    const bundle = {
+      name: proj.name,
+      path: proj.path,
+      description: proj.description,
+      exportedAt: new Date().toISOString(),
+      filesCount: proj.files.size,
+      files: Array.from(proj.files.values()).map((f) => ({
+        path: f.path,
+        language: f.language,
+        sizeBytes: f.sizeBytes,
+        lastModified: f.lastModified,
+        content: f.content,
+      })),
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${proj.name}-export.json"`);
+    res.json(bundle);
   });
 
   app.post('/api/projects', (req, res) => {
@@ -307,10 +416,10 @@ async function startServer() {
     }
   });
 
-  // Import Project directly from GitHub
+  // Import Project directly from GitHub with streaming buffer system
   app.post('/api/projects/import-github', async (req, res) => {
     try {
-      const { repoUrl, branch, subpath, projectName: customName, token, maxFiles = 60 } = req.body;
+      const { repoUrl, branch, subpath, projectName: customName, token, maxFiles } = req.body;
       if (!repoUrl) {
         return res.status(400).json({ error: 'A URL ou identificador do repositório (owner/repo) é obrigatório.' });
       }
@@ -320,45 +429,54 @@ async function startServer() {
         return res.status(400).json({ error: 'Formato de repositório inválido. Utilize "owner/repo" ou "https://github.com/owner/repo".' });
       }
 
-      const result = await importGitHubRepository({
-        repoUrl,
-        branch,
-        subpath,
-        token,
-        maxFiles: Number(maxFiles) || 60,
-      });
-
-      const baseName = result.repo.repo || 'github-project';
-      const cleanProjName = (customName || baseName)
+      const cleanProjName = (customName || parsed.repo)
         .toLowerCase()
         .replace(/[^a-z0-9_-]/g, '-')
         .replace(/^-+|-+$/g, '') || 'github-project';
 
       const projPath = `/workspace/${cleanProjName}`;
-      const description = result.repo.description
-        ? `${result.repo.description} (GitHub: ${result.repo.owner}/${result.repo.repo}@${result.branch})`
-        : `Repositório importado do GitHub: ${result.repo.owner}/${result.repo.repo}@${result.branch}`;
 
-      // Create project in projectStore
-      const proj = projectStore.createProject(cleanProjName, projPath, description);
+      let createdProj = projectStore.getProject(cleanProjName);
+      if (!createdProj) {
+        createdProj = projectStore.createProject(
+          cleanProjName,
+          projPath,
+          `Repositório importado do GitHub: ${parsed.owner}/${parsed.repo}`
+        );
+      }
 
       let savedCount = 0;
       const detectedLangs = new Set<string>();
 
-      for (const file of result.files) {
-        try {
-          const saved = projectStore.saveFile(proj.name, file.path, file.content);
-          detectedLangs.add(saved.language);
-          savedCount++;
-        } catch {
-          // ignore path isolation conflicts
-        }
+      // Import with streaming buffer: files are persisted in batches as they stream in
+      const result = await importGitHubRepository({
+        repoUrl,
+        branch,
+        subpath,
+        token,
+        maxFiles: typeof maxFiles === 'number' && maxFiles > 0 ? maxFiles : 0, // 0 = unlimited
+        batchSize: 25,
+        onBatch: (batch) => {
+          projectStore.saveFilesBatch(
+            cleanProjName,
+            batch.map((f) => ({ path: f.path, content: f.content }))
+          );
+          for (const f of batch) {
+            detectedLangs.add(f.language);
+          }
+          savedCount += batch.length;
+        },
+      });
+
+      // Update project description with stars and branch
+      if (result.repo.description) {
+        createdProj.description = `${result.repo.description} (GitHub: ${result.repo.owner}/${result.repo.repo}@${result.branch})`;
       }
 
       res.json({
         status: 'imported',
-        project: proj.name,
-        path: proj.path,
+        project: cleanProjName,
+        path: projPath,
         filesCount: savedCount,
         totalDiscovered: result.totalDiscovered,
         detectedLanguages: Array.from(detectedLangs),
@@ -371,10 +489,121 @@ async function startServer() {
     }
   });
 
+  // Get single project details (Read)
+  app.get('/api/projects/:name', (req, res) => {
+    const proj = projectStore.getProject(req.params.name);
+    if (!proj) return res.status(404).json({ error: 'Projeto não encontrado' });
+    res.json({
+      name: proj.name,
+      path: proj.path,
+      description: proj.description,
+      filesCount: proj.files.size,
+      files: Array.from(proj.files.keys()),
+    });
+  });
+
+  // Update project metadata (Update)
+  app.put('/api/projects/:name', (req, res) => {
+    try {
+      const { name, path: projPath, description } = req.body;
+      const updated = projectStore.updateProject(req.params.name, {
+        name,
+        path: projPath,
+        description,
+      });
+      res.json({
+        status: 'updated',
+        project: updated.name,
+        path: updated.path,
+        description: updated.description,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/projects/:name', (req, res) => {
+    try {
+      const { name, path: projPath, description } = req.body;
+      const updated = projectStore.updateProject(req.params.name, {
+        name,
+        path: projPath,
+        description,
+      });
+      res.json({
+        status: 'updated',
+        project: updated.name,
+        path: updated.path,
+        description: updated.description,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Clone project (Clone)
+  app.post('/api/projects/:name/clone', (req, res) => {
+    try {
+      const { targetName, targetPath, targetDescription } = req.body;
+      if (!targetName) {
+        return res.status(400).json({ error: 'O nome do novo projeto (targetName) é obrigatório.' });
+      }
+      const cloned = projectStore.cloneProject(
+        req.params.name,
+        targetName,
+        targetPath,
+        targetDescription
+      );
+      res.json({
+        status: 'cloned',
+        project: cloned.name,
+        path: cloned.path,
+        description: cloned.description,
+        filesCount: cloned.files.size,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.delete('/api/projects/:name', (req, res) => {
     const ok = projectStore.removeProject(req.params.name);
     if (!ok) return res.status(404).json({ error: 'Project not found' });
     res.json({ status: 'deleted', project: req.params.name });
+  });
+
+  // SQLite Database Explorer API
+  app.get('/api/database/schema', (_req, res) => {
+    try {
+      const schema = sqliteStorage.getDatabaseSchema();
+      res.json(schema);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Falha ao inspecionar o esquema do banco de dados.' });
+    }
+  });
+
+  app.get('/api/database/table/:name', (req, res) => {
+    try {
+      const limit = Number(req.query.limit) || 50;
+      const offset = Number(req.query.offset) || 0;
+      const data = sqliteStorage.getTableRecords(req.params.name, limit, offset);
+      res.json(data);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/database/query', (req, res) => {
+    try {
+      const { sql } = req.body;
+      if (!sql || typeof sql !== 'string') {
+        return res.status(400).json({ error: 'Parâmetro SQL é obrigatório e deve ser uma string.' });
+      }
+      const result = sqliteStorage.executeRawQuery(sql);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Erro na execução da consulta SQL.' });
+    }
   });
 
   // Files API
@@ -746,7 +975,7 @@ async function startServer() {
           const projs = projectStore.listProjects();
           const resources = projs.flatMap((p) =>
             projectStore.listFiles(p.name).map((f) => ({
-              uri: `file://${p.path}/${f}`,
+              uri: `file://${p.path.startsWith('/') ? '' : '/'}${p.path}/${f}`,
               name: `${p.name}/${f}`,
               mimeType: 'text/plain',
             }))
@@ -755,6 +984,89 @@ async function startServer() {
             jsonrpc: '2.0',
             id,
             result: { resources },
+          });
+        }
+
+        case 'resources/read': {
+          const { uri } = params || {};
+          if (!uri || typeof uri !== 'string') {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              error: { code: -32602, message: 'Missing or invalid uri parameter in resources/read' },
+            });
+          }
+
+          const projs = projectStore.listProjects();
+          let matchedContent: string | null = null;
+          let matchedMimeType = 'text/plain';
+
+          for (const p of projs) {
+            const files = projectStore.listFiles(p.name);
+            for (const f of files) {
+              const fileUri = `file://${p.path.startsWith('/') ? '' : '/'}${p.path}/${f}`;
+              if (uri === fileUri || uri.endsWith(`/${f}`) || uri.includes(`${p.name}/${f}`)) {
+                const fileObj = projectStore.getFile(p.name, f);
+                if (fileObj) {
+                  matchedContent = fileObj.content;
+                  break;
+                }
+              }
+            }
+            if (matchedContent !== null) break;
+          }
+
+          if (matchedContent === null) {
+            return res.json({
+              jsonrpc: '2.0',
+              id,
+              error: { code: -32002, message: `Resource not found for uri: ${uri}` },
+            });
+          }
+
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              contents: [
+                {
+                  uri,
+                  mimeType: matchedMimeType,
+                  text: matchedContent,
+                },
+              ],
+            },
+          });
+        }
+
+        case 'ping': {
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {},
+          });
+        }
+
+        case 'notifications/initialized': {
+          // MCP notification, no response required or return empty ok
+          return res.json({
+            jsonrpc: '2.0',
+            id: id ?? null,
+            result: { status: 'acknowledged' },
+          });
+        }
+
+        case 'roots/list': {
+          const projs = projectStore.listProjects();
+          return res.json({
+            jsonrpc: '2.0',
+            id,
+            result: {
+              roots: projs.map((p) => ({
+                uri: `file://${p.path.startsWith('/') ? '' : '/'}${p.path}`,
+                name: p.name,
+              })),
+            },
           });
         }
 

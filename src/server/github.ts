@@ -20,7 +20,19 @@ export interface GitHubImportResult {
   branch: string;
   files: ImportedGitHubFile[];
   totalDiscovered: number;
+  totalImported: number;
   detectedLanguages: string[];
+}
+
+export interface GitHubImportOptions {
+  repoUrl: string;
+  branch?: string;
+  subpath?: string;
+  token?: string;
+  maxFiles?: number; // 0 or undefined means unlimited (no restriction)
+  batchSize?: number; // streaming buffer flush threshold (default 25)
+  concurrency?: number; // concurrent download requests (default 12)
+  onBatch?: (batch: ImportedGitHubFile[], progress: { processed: number; total: number }) => Promise<void> | void;
 }
 
 const ALLOWED_EXTS = new Set([
@@ -98,7 +110,7 @@ export async function fetchGitHubRepoDetails(
     }
     if (res.status === 403) {
       const rateLimitMsg = res.headers.get('x-ratelimit-remaining') === '0'
-        ? 'Limite de requisições anônimas da API do GitHub excedido. Forneça um Personal Access Token para continuar.'
+        ? 'Limite de requisições da API do GitHub excedido. Forneça um Personal Access Token para continuar.'
         : 'Acesso negado pela API do GitHub.';
       throw new Error(rateLimitMsg);
     }
@@ -116,15 +128,16 @@ export async function fetchGitHubRepoDetails(
 }
 
 /**
- * Fetches and filters source code files from GitHub repository.
+ * Streaming Async Generator: Fetches files in buffered batches without arbitrary file count restrictions.
+ * Implements a streaming buffer queue to process large repositories efficiently without high memory pressure.
  */
-export async function importGitHubRepository(options: {
-  repoUrl: string;
-  branch?: string;
-  subpath?: string;
-  token?: string;
-  maxFiles?: number;
-}): Promise<GitHubImportResult> {
+export async function* streamGitHubRepository(options: GitHubImportOptions): AsyncGenerator<{
+  batch: ImportedGitHubFile[];
+  processed: number;
+  total: number;
+  repo: GitHubRepoDetails;
+  branch: string;
+}> {
   const parsed = parseGitHubRepo(options.repoUrl);
   if (!parsed) {
     throw new Error('URL ou formato de repositório inválido. Utilize "owner/repo" ou "https://github.com/owner/repo".');
@@ -132,7 +145,6 @@ export async function importGitHubRepository(options: {
 
   const details = await fetchGitHubRepoDetails(parsed.owner, parsed.repo, options.token);
   const targetBranch = options.branch?.trim() || details.defaultBranch;
-  const maxFiles = Math.min(Math.max(1, options.maxFiles || 60), 120);
 
   const headers: Record<string, string> = {
     'User-Agent': 'AIStudio-TreeSitter-MCP',
@@ -151,12 +163,12 @@ export async function importGitHubRepository(options: {
   }
 
   const treeData = await treeRes.json();
-  const tree: Array<{ path: string; mode: string; type: string; sha: string; size?: number }> = treeData.tree || [];
+  const rawTree: Array<{ path: string; mode: string; type: string; sha: string; size?: number }> = treeData.tree || [];
 
   const subpathFilter = options.subpath?.trim().replace(/^\/+|\/+$/g, '') || '';
 
-  // Filter to valid code files
-  const candidateFiles = tree.filter((item) => {
+  // Filter to valid code files without arbitrary count limits
+  const candidateFiles = rawTree.filter((item) => {
     if (item.type !== 'blob') return false;
     if (subpathFilter && !item.path.startsWith(`${subpathFilter}/`) && item.path !== subpathFilter) {
       return false;
@@ -165,8 +177,8 @@ export async function importGitHubRepository(options: {
     if (IGNORED_PATHS.some((ign) => item.path.includes(ign))) {
       return false;
     }
-    // Exclude large binary/asset files (> 500KB)
-    if (item.size && item.size > 500 * 1024) {
+    // Exclude large binary/asset files (> 1MB)
+    if (item.size && item.size > 1024 * 1024) {
       return false;
     }
     const extMatch = item.path.match(/\.[a-zA-Z0-9]+$/);
@@ -174,17 +186,27 @@ export async function importGitHubRepository(options: {
     return ALLOWED_EXTS.has(extMatch[0].toLowerCase());
   });
 
-  const selectedFiles = candidateFiles.slice(0, maxFiles);
-  const detectedLanguages = new Set<string>();
+  // If user specified an explicit non-zero maxFiles, respect it; otherwise import everything discovered
+  const targetFiles = options.maxFiles && options.maxFiles > 0
+    ? candidateFiles.slice(0, options.maxFiles)
+    : candidateFiles;
 
-  // Concurrently fetch content in batches of 10
-  const importedFiles: ImportedGitHubFile[] = [];
-  const batchSize = 10;
+  const total = targetFiles.length;
+  if (total === 0) {
+    throw new Error('Nenhum arquivo de código suportado foi encontrado no repositório com os filtros informados.');
+  }
 
-  for (let i = 0; i < selectedFiles.length; i += batchSize) {
-    const batch = selectedFiles.slice(i, i + batchSize);
-    const results = await Promise.all(
-      batch.map(async (item) => {
+  const concurrency = Math.min(Math.max(1, options.concurrency || 12), 30);
+  const bufferLimit = Math.min(Math.max(1, options.batchSize || 25), 100);
+
+  let streamBuffer: ImportedGitHubFile[] = [];
+  let processed = 0;
+
+  // Process files in controlled concurrent worker chunks
+  for (let i = 0; i < total; i += concurrency) {
+    const chunk = targetFiles.slice(i, i + concurrency);
+    const downloaded = await Promise.all(
+      chunk.map(async (item) => {
         try {
           const rawUrl = `https://raw.githubusercontent.com/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/${encodeURIComponent(targetBranch)}/${item.path}`;
           const rawRes = await fetch(rawUrl, {
@@ -194,19 +216,17 @@ export async function importGitHubRepository(options: {
           if (!rawRes.ok) return null;
           const content = await rawRes.text();
 
-          // Calculate normalized relative path if subpath was specified
           const relativePath = subpathFilter && item.path.startsWith(`${subpathFilter}/`)
             ? item.path.slice(subpathFilter.length + 1)
             : item.path;
 
           const lang = detectLanguage(relativePath);
-          detectedLanguages.add(lang);
 
           return {
             path: relativePath,
             content,
             language: lang,
-            size: content.length,
+            size: Buffer.byteLength(content, 'utf-8'),
           };
         } catch {
           return null;
@@ -214,22 +234,75 @@ export async function importGitHubRepository(options: {
       })
     );
 
-    for (const res of results) {
-      if (res && res.content.length > 0) {
-        importedFiles.push(res);
+    for (const file of downloaded) {
+      if (file && file.content.length > 0) {
+        streamBuffer.push(file);
       }
+    }
+    processed += chunk.length;
+
+    // Flush buffer when threshold reached
+    if (streamBuffer.length >= bufferLimit) {
+      const batchToYield = [...streamBuffer];
+      streamBuffer = [];
+      yield {
+        batch: batchToYield,
+        processed,
+        total,
+        repo: details,
+        branch: targetBranch,
+      };
     }
   }
 
-  if (importedFiles.length === 0) {
-    throw new Error('Nenhum arquivo de código suportado foi encontrado no repositório com os filtros informados.');
+  // Flush any remaining files in buffer
+  if (streamBuffer.length > 0) {
+    yield {
+      batch: streamBuffer,
+      processed: total,
+      total,
+      repo: details,
+      branch: targetBranch,
+    };
+  }
+}
+
+/**
+ * High-level import that utilizes the streaming buffer system.
+ * Removes the arbitrary 80-file restriction, supporting full repository imports.
+ */
+export async function importGitHubRepository(options: GitHubImportOptions): Promise<GitHubImportResult> {
+  const allFiles: ImportedGitHubFile[] = [];
+  const detectedLanguages = new Set<string>();
+  let repoDetails: GitHubRepoDetails | null = null;
+  let targetBranch = '';
+  let totalDiscovered = 0;
+
+  for await (const chunk of streamGitHubRepository(options)) {
+    repoDetails = chunk.repo;
+    targetBranch = chunk.branch;
+    totalDiscovered = chunk.total;
+
+    for (const file of chunk.batch) {
+      allFiles.push(file);
+      detectedLanguages.add(file.language);
+    }
+
+    if (options.onBatch) {
+      await options.onBatch(chunk.batch, { processed: chunk.processed, total: chunk.total });
+    }
+  }
+
+  if (!repoDetails || allFiles.length === 0) {
+    throw new Error('Nenhum arquivo de código foi importado do repositório.');
   }
 
   return {
-    repo: details,
+    repo: repoDetails,
     branch: targetBranch,
-    files: importedFiles,
-    totalDiscovered: candidateFiles.length,
+    files: allFiles,
+    totalDiscovered,
+    totalImported: allFiles.length,
     detectedLanguages: Array.from(detectedLanguages),
   };
 }

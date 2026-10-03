@@ -1,12 +1,24 @@
 import { ASTNode, SimilarityResult } from './types';
 import { parseSourceToAST } from './parser';
 
-export function getASTFingerprint(node: ASTNode, maxDepth = 4): string[] {
+/**
+ * Extracts normalized AST structure fingerprint tokens.
+ * Normalizes identifier names to '$VAR' or '$TYPE' for Type-2 clone detection.
+ */
+export function getASTFingerprint(node: ASTNode, maxDepth = 6, normalize = true): string[] {
   const tokens: string[] = [];
 
   function collect(n: ASTNode, depth: number) {
     if (depth > maxDepth) return;
-    tokens.push(n.type);
+
+    if (normalize && (n.type === 'identifier' || n.type === 'variable_name')) {
+      tokens.push('id:$VAR');
+    } else if (normalize && (n.type === 'type_identifier' || n.type === 'type_spec')) {
+      tokens.push('type:$TYPE');
+    } else {
+      tokens.push(n.type);
+    }
+
     for (const c of n.children) {
       collect(c, depth + 1);
     }
@@ -33,7 +45,7 @@ export function findSimilarCodeBlocks(
   targetSnippet: string,
   targetLanguage: string,
   candidateFiles: Array<{ path: string; content: string; language: string }>,
-  threshold = 0.6,
+  threshold = 0.5,
   maxResults = 10
 ): SimilarityResult[] {
   const targetAST = parseSourceToAST(targetSnippet, targetLanguage);
@@ -41,25 +53,33 @@ export function findSimilarCodeBlocks(
   const targetSet = new Set(targetTokens);
 
   const results: SimilarityResult[] = [];
+  const seenMatches = new Set<string>();
 
   for (const file of candidateFiles) {
     const fileAST = parseSourceToAST(file.content, file.language);
 
-    // Test blocks (e.g. function or class nodes)
+    // Test blocks (e.g. function, class, or composite statement blocks)
     function inspect(node: ASTNode) {
-      if (
+      const isBlock =
         node.type === 'function_definition' ||
         node.type === 'function_declaration' ||
+        node.type === 'method_declaration' ||
+        node.type === 'function_item' ||
         node.type === 'class_definition' ||
         node.type === 'class_declaration' ||
+        node.type === 'struct_item' ||
         node.type === 'block' ||
-        node.type === 'statement_block'
-      ) {
+        node.type === 'statement_block';
+
+      if (isBlock) {
         const candidateTokens = getASTFingerprint(node);
         const candidateSet = new Set(candidateTokens);
         const score = computeJaccardSimilarity(targetSet, candidateSet);
 
-        if (score >= threshold) {
+        const matchKey = `${file.path}:${node.startPoint.row}-${node.endPoint.row}`;
+
+        if (score >= threshold && !seenMatches.has(matchKey)) {
+          seenMatches.add(matchKey);
           results.push({
             filePath: file.path,
             score: Math.round(score * 100) / 100,

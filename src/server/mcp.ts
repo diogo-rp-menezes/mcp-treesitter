@@ -4,7 +4,6 @@ import { executeQuery } from './queryEngine';
 import { calculateComplexity } from './complexity';
 import { findSimilarCodeBlocks } from './similarity';
 import { COMMON_NODE_DESCRIPTIONS, TEMPLATES } from './templates';
-import { z } from 'zod';
 
 export const MCP_TOOLS_METADATA = [
   {
@@ -158,115 +157,76 @@ export const MCP_TOOLS_METADATA = [
       },
     },
   },
+  {
+    name: 'register_project_tool',
+    description: 'Register a new project in the workspace.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Project name' },
+        path: { type: 'string', description: 'Root path of the project' },
+        description: { type: 'string', description: 'Project description' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'get_node_types',
+    description: 'Get common AST node type descriptions for a language.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        language: { type: 'string', description: 'Language identifier' },
+      },
+      required: ['language'],
+    },
+  },
+  {
+    name: 'clear_cache',
+    description: 'Clear internal AST and query result caches.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'configure',
+    description: 'Update server configuration such as caching, file limits, or log level.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cache_enabled: { type: 'boolean', description: 'Enable or disable AST cache' },
+        max_file_size_mb: { type: 'number', description: 'Max allowed file size in MB' },
+        log_level: { type: 'string', description: 'Log level (DEBUG, INFO, WARN, ERROR)' },
+      },
+    },
+  },
 ];
 
-// Zod schemas for MCP tool argument validation
-// Compiled once at module load for performance
-export const MCP_TOOL_SCHEMAS = {
-  get_ast: z.object({
-    project: z.string().optional(),
-    path: z.string().optional(),
-    code: z.string().optional(),
-    language: z.string().optional(),
-    max_depth: z.number().int().positive().optional(),
-  }),
+// Global runtime MCP configuration and AST cache
+export const mcpConfig = {
+  cacheEnabled: true,
+  maxFileSizeMb: 10,
+  logLevel: 'INFO',
+};
 
-  run_query: z.object({
-    project: z.string().optional(),
-    query: z.string().min(1),
-    file_path: z.string().optional(),
-    code: z.string().optional(),
-    language: z.string().optional(),
-    capture_filter: z.string().optional(),
-  }),
+const astCache = new Map<string, { ast: any; timestamp: number }>();
 
-  get_symbols: z.object({
-    project: z.string().optional(),
-    file_path: z.string().optional(),
-    code: z.string().optional(),
-    language: z.string().optional(),
-  }),
+export function getCachedAST(cacheKey: string, computeFn: () => any) {
+  if (!mcpConfig.cacheEnabled) {
+    return computeFn();
+  }
+  const cached = astCache.get(cacheKey);
+  if (cached) {
+    return cached.ast;
+  }
+  const result = computeFn();
+  astCache.set(cacheKey, { ast: result, timestamp: Date.now() });
+  return result;
+}
 
-  analyze_complexity: z.object({
-    project: z.string().optional(),
-    file_path: z.string().optional(),
-    code: z.string().optional(),
-    language: z.string().optional(),
-  }),
-
-  get_node_at_position: z.object({
-    project: z.string().optional(),
-    path: z.string().optional(),
-    row: z.number().int().nonnegative(),
-    column: z.number().int().nonnegative(),
-  }),
-
-  find_similar_code: z.object({
-    project: z.string().optional(),
-    snippet: z.string().min(1),
-    language: z.string().optional(),
-    threshold: z.number().min(0).max(1).optional(),
-    max_results: z.number().int().positive().optional(),
-  }),
-
-  list_languages: z.object({}),
-
-  list_projects_tool: z.object({}),
-
-  list_files: z.object({
-    project: z.string().min(1),
-    pattern: z.string().optional(),
-    extensions: z.array(z.string()).optional(),
-  }),
-
-  get_file: z.object({
-    project: z.string().min(1),
-    path: z.string().min(1),
-  }),
-
-  get_query_template_tool: z.object({
-    language: z.string().min(1),
-    template_name: z.string().min(1),
-  }),
-
-  list_query_templates_tool: z.object({
-    language: z.string().optional(),
-  }),
-
-  get_node_types: z.object({
-    language: z.string().optional(),
-  }),
-
-  clear_cache: z.object({}),
-
-  configure: z.object({
-    cache_enabled: z.boolean().optional(),
-    max_file_size_mb: z.number().int().positive().optional(),
-    log_level: z.string().optional(),
-  }),
-
-  audit_project_isolation: z.object({
-    project: z.string().optional(),
-  }),
-} as const;
-
-// Inferred types from schemas for type-safe tool handlers
-export type GetAstArgs = z.infer<typeof MCP_TOOL_SCHEMAS.get_ast>;
-export type RunQueryArgs = z.infer<typeof MCP_TOOL_SCHEMAS.run_query>;
-export type GetSymbolsArgs = z.infer<typeof MCP_TOOL_SCHEMAS.get_symbols>;
-export type AnalyzeComplexityArgs = z.infer<typeof MCP_TOOL_SCHEMAS.analyze_complexity>;
-export type GetNodeAtPositionArgs = z.infer<typeof MCP_TOOL_SCHEMAS.get_node_at_position>;
-export type FindSimilarCodeArgs = z.infer<typeof MCP_TOOL_SCHEMAS.find_similar_code>;
-export type ListLanguagesArgs = z.infer<typeof MCP_TOOL_SCHEMAS.list_languages>;
-export type ListProjectsToolArgs = z.infer<typeof MCP_TOOL_SCHEMAS.list_projects_tool>;
-export type ListFilesArgs = z.infer<typeof MCP_TOOL_SCHEMAS.list_files>;
-export type GetFileArgs = z.infer<typeof MCP_TOOL_SCHEMAS.get_file>;
-export type GetQueryTemplateToolArgs = z.infer<typeof MCP_TOOL_SCHEMAS.get_query_template_tool>;
-export type ListQueryTemplatesToolArgs = z.infer<typeof MCP_TOOL_SCHEMAS.list_query_templates_tool>;
-export type GetNodeTypesArgs = z.infer<typeof MCP_TOOL_SCHEMAS.get_node_types>;
-export type ClearCacheArgs = z.infer<typeof MCP_TOOL_SCHEMAS.clear_cache>;
-export type ConfigureArgs = z.infer<typeof MCP_TOOL_SCHEMAS.configure>;
-export type AuditProjectIsolationArgs = z.infer<typeof MCP_TOOL_SCHEMAS.audit_project_isolation>;
+export function clearASTCache(): number {
+  const count = astCache.size;
+  astCache.clear();
+  return count;
+}
 
 export const MCP_PROMPTS_METADATA = [
   {
@@ -306,38 +266,7 @@ export const MCP_PROMPTS_METADATA = [
   },
 ];
 
-// Validation error class for JSON-RPC error responses
-export class ValidationError extends Error {
-  constructor(
-    public readonly code: number,
-    message: string,
-    public readonly details: z.ZodError
-  ) {
-    super(message);
-    this.name = 'ValidationError';
-  }
-}
-
-function validateArgs<T>(schema: z.ZodSchema<T>, args: unknown, toolName: string): T {
-  const result = schema.safeParse(args);
-  if (!result.success) {
-    const errorDetails = result.error.flatten();
-    throw new ValidationError(
-      -32602,
-      `Invalid parameters for tool '${toolName}': ${errorDetails.formErrors.join(', ') || 'Validation failed'}`,
-      result.error
-    );
-  }
-  return result.data;
-}
-
 export async function handleMCPToolCall(name: string, args: Record<string, any>): Promise<any> {
-  // Validate arguments against schema before processing
-  const schema = MCP_TOOL_SCHEMAS[name as keyof typeof MCP_TOOL_SCHEMAS];
-  if (schema) {
-    args = validateArgs(schema, args, name);
-  }
-
   switch (name) {
     case 'list_languages': {
       return {
@@ -351,8 +280,7 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
     }
 
     case 'register_project_tool': {
-      const { name: projectName, path, description } = args as { name: string; path?: string; description?: string };
-      const proj = projectStore.createProject(projectName || 'unnamed', path, description);
+      const proj = projectStore.createProject(args.name || 'unnamed', args.path, args.description);
       return {
         name: proj.name,
         path: proj.path,
@@ -361,21 +289,18 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
     }
 
     case 'list_files': {
-      const { project, pattern, extensions } = args as ListFilesArgs;
-      return projectStore.listFiles(project, pattern, extensions);
+      return projectStore.listFiles(args.project, args.pattern, args.extensions);
     }
 
     case 'get_file': {
-      const { project, path } = args as GetFileArgs;
-      const f = projectStore.getFile(project, path);
-      if (!f) throw new Error(`File ${path} not found in project ${project}`);
+      const f = projectStore.getFile(args.project, args.path);
+      if (!f) throw new Error(`File ${args.path} not found in project ${args.project}`);
       return f.content;
     }
 
     case 'get_file_metadata': {
-      const { project, path } = args as { project: string; path: string };
-      const f = projectStore.getFile(project, path);
-      if (!f) throw new Error(`File ${path} not found in project ${project}`);
+      const f = projectStore.getFile(args.project, args.path);
+      if (!f) throw new Error(`File ${args.path} not found in project ${args.project}`);
       return {
         path: f.path,
         language: f.language,
@@ -385,99 +310,93 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
     }
 
     case 'get_ast': {
-      const { project, path, code, language, max_depth } = args as GetAstArgs;
-      let sourceCode = code;
-      let lang = language || 'python';
+      let code = args.code;
+      let lang = args.language || 'python';
 
-      if (!sourceCode && project && path) {
-        const file = projectStore.getFile(project, path);
-        if (!file) throw new Error(`File ${path} not found`);
-        sourceCode = file.content;
+      if (!code && args.project && args.path) {
+        const file = projectStore.getFile(args.project, args.path);
+        if (!file) throw new Error(`File ${args.path} not found`);
+        code = file.content;
         lang = file.language;
       }
 
-      if (!sourceCode) throw new Error('Either code or project + path must be provided');
-      return parseSourceToAST(sourceCode, lang, max_depth);
+      if (!code) throw new Error('Either code or project + path must be provided');
+      return parseSourceToAST(code, lang);
     }
 
     case 'get_node_at_position': {
-      const { project, path, code, language, row, column } = args as GetNodeAtPositionArgs;
-      let sourceCode = code;
-      let lang = language || 'python';
+      let code = args.code;
+      let lang = args.language || 'python';
 
-      if (!sourceCode && project && path) {
-        const file = projectStore.getFile(project, path);
-        if (!file) throw new Error(`File ${path} not found`);
-        sourceCode = file.content;
+      if (!code && args.project && args.path) {
+        const file = projectStore.getFile(args.project, args.path);
+        if (!file) throw new Error(`File ${args.path} not found`);
+        code = file.content;
         lang = file.language;
       }
 
-      if (!sourceCode) throw new Error('Code or project + path required');
-      const ast = parseSourceToAST(sourceCode, lang);
-      const node = findNodeAtPosition(ast, row, column);
+      if (!code) throw new Error('Code or project + path required');
+      const ast = parseSourceToAST(code, lang);
+      const node = findNodeAtPosition(ast, Number(args.row), Number(args.column));
       return node || { error: 'No node found at specified position' };
     }
 
     case 'run_query': {
-      const { project, query, file_path, code, language, capture_filter } = args as RunQueryArgs;
-      let sourceCode = code;
-      let lang = language || 'python';
+      let code = args.code;
+      let lang = args.language || 'python';
 
-      if (!sourceCode && project && (file_path || path)) {
-        const filePath = file_path || path;
-        const file = projectStore.getFile(project, filePath);
+      if (!code && args.project && (args.file_path || args.path)) {
+        const filePath = args.file_path || args.path;
+        const file = projectStore.getFile(args.project, filePath);
         if (!file) throw new Error(`File ${filePath} not found`);
-        sourceCode = file.content;
+        code = file.content;
         lang = file.language;
       }
 
-      if (!sourceCode) throw new Error('Code or file_path required');
-      const ast = parseSourceToAST(sourceCode, lang);
-      const matches = executeQuery(ast, query, {
-        captureFilter: capture_filter,
+      if (!code) throw new Error('Code or file_path required');
+      const ast = parseSourceToAST(code, lang);
+      const matches = executeQuery(ast, args.query, {
+        captureFilter: args.capture_filter,
       });
       return matches;
     }
 
     case 'get_symbols': {
-      const { project, file_path, code, language } = args as GetSymbolsArgs;
-      let sourceCode = code;
-      let lang = language || 'python';
+      let code = args.code;
+      let lang = args.language || 'python';
 
-      if (!sourceCode && project && (file_path || path)) {
-        const filePath = file_path || path;
-        const file = projectStore.getFile(project, filePath);
+      if (!code && args.project && (args.file_path || args.path)) {
+        const filePath = args.file_path || args.path;
+        const file = projectStore.getFile(args.project, filePath);
         if (!file) throw new Error(`File ${filePath} not found`);
-        sourceCode = file.content;
+        code = file.content;
         lang = file.language;
       }
 
-      if (!sourceCode) throw new Error('Code or file_path required');
-      const ast = parseSourceToAST(sourceCode, lang);
+      if (!code) throw new Error('Code or file_path required');
+      const ast = parseSourceToAST(code, lang);
       return extractSymbolsFromAST(ast, lang);
     }
 
     case 'analyze_complexity': {
-      const { project, file_path, code, language } = args as AnalyzeComplexityArgs;
-      let sourceCode = code;
-      let lang = language || 'python';
+      let code = args.code;
+      let lang = args.language || 'python';
 
-      if (!sourceCode && project && (file_path || path)) {
-        const filePath = file_path || path;
-        const file = projectStore.getFile(project, filePath);
+      if (!code && args.project && (args.file_path || args.path)) {
+        const filePath = args.file_path || args.path;
+        const file = projectStore.getFile(args.project, filePath);
         if (!file) throw new Error(`File ${filePath} not found`);
-        sourceCode = file.content;
+        code = file.content;
         lang = file.language;
       }
 
-      if (!sourceCode) throw new Error('Code or file_path required');
-      const ast = parseSourceToAST(sourceCode, lang);
-      return calculateComplexity(sourceCode, ast);
+      if (!code) throw new Error('Code or file_path required');
+      const ast = parseSourceToAST(code, lang);
+      return calculateComplexity(code, ast);
     }
 
     case 'find_similar_code': {
-      const { project, snippet, language, threshold, max_results } = args as FindSimilarCodeArgs;
-      const proj = projectStore.getProject(project || 'tree-sitter-core');
+      const proj = projectStore.getProject(args.project || 'tree-sitter-core');
       const candidates = proj
         ? Array.from(proj.files.values()).map((f) => ({
             path: f.path,
@@ -487,29 +406,27 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
         : [];
 
       return findSimilarCodeBlocks(
-        snippet,
-        language || 'python',
+        args.snippet,
+        args.language || 'python',
         candidates,
-        threshold ?? 0.5,
-        max_results ?? 10
+        args.threshold || 0.5,
+        args.max_results || 10
       );
     }
 
     case 'get_query_template_tool': {
-      const { language, template_name } = args as GetQueryTemplateToolArgs;
-      const t = TEMPLATES[language]?.[template_name];
-      if (!t) throw new Error(`Template ${template_name} not found for ${language}`);
+      const t = TEMPLATES[args.language]?.[args.template_name];
+      if (!t) throw new Error(`Template ${args.template_name} not found for ${args.language}`);
       return {
-        language,
-        name: template_name,
+        language: args.language,
+        name: args.template_name,
         query: t,
       };
     }
 
     case 'list_query_templates_tool': {
-      const { language } = args as ListQueryTemplatesToolArgs;
-      if (language) {
-        return { [language]: Object.keys(TEMPLATES[language] || {}) };
+      if (args.language) {
+        return { [args.language]: Object.keys(TEMPLATES[args.language] || {}) };
       }
       const res: Record<string, string[]> = {};
       for (const [l, t] of Object.entries(TEMPLATES)) {
@@ -519,26 +436,33 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
     }
 
     case 'get_node_types': {
-      const { language } = args as GetNodeTypesArgs;
-      return COMMON_NODE_DESCRIPTIONS[language || ''] || {};
+      return COMMON_NODE_DESCRIPTIONS[args.language] || {};
     }
 
     case 'clear_cache': {
-      return { status: 'success', message: 'Parse tree caches successfully cleared' };
+      const clearedCount = clearASTCache();
+      return { status: 'success', message: `Parse tree caches successfully cleared (${clearedCount} cached entries removed)` };
     }
 
     case 'configure': {
-      const { cache_enabled, max_file_size_mb, log_level } = args as ConfigureArgs;
+      if (typeof args.cache_enabled === 'boolean') {
+        mcpConfig.cacheEnabled = args.cache_enabled;
+      }
+      if (typeof args.max_file_size_mb === 'number') {
+        mcpConfig.maxFileSizeMb = args.max_file_size_mb;
+      }
+      if (typeof args.log_level === 'string') {
+        mcpConfig.logLevel = args.log_level;
+      }
       return {
-        cache: { enabled: cache_enabled ?? true, max_size_mb: 100 },
-        security: { max_file_size_mb: max_file_size_mb ?? 10 },
-        log_level: log_level || 'INFO',
+        cache: { enabled: mcpConfig.cacheEnabled, max_size_mb: 100 },
+        security: { max_file_size_mb: mcpConfig.maxFileSizeMb },
+        log_level: mcpConfig.logLevel,
       };
     }
 
     case 'audit_project_isolation': {
-      const { project } = args as AuditProjectIsolationArgs;
-      const proj = project || 'tree-sitter-core';
+      const proj = args.project || 'tree-sitter-core';
       const report = projectStore.auditIsolation(proj);
       if (!report) throw new Error(`Project '${proj}' not found`);
       return report;

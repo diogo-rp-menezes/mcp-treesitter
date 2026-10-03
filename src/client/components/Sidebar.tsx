@@ -9,9 +9,10 @@ import {
   FolderTree,
   CheckCircle2,
   Cpu,
+  Database,
 } from 'lucide-react';
 
-export type NavTab = 'ast' | 'query' | 'symbols' | 'complexity' | 'similarity' | 'mcp' | 'projects';
+export type NavTab = 'ast' | 'query' | 'symbols' | 'complexity' | 'similarity' | 'mcp' | 'projects' | 'database';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -62,6 +63,12 @@ export function Sidebar({ activeTab, onSelectTab, symbolsCount }: SidebarProps) 
       label: 'Arquivos & Projetos',
       sublabel: 'Workspace',
       icon: FolderTree,
+    },
+    {
+      id: 'database' as NavTab,
+      label: 'Database',
+      sublabel: 'SQLite Explorer',
+      icon: Database,
     },
   ];
 

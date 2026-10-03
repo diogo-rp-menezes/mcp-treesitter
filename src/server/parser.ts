@@ -99,6 +99,16 @@ export function parseSourceToAST(source: string, language: string = 'python'): A
     return parseGo(source, lines, rootStart, rootEnd, makeNode);
   } else if (language === 'rust') {
     return parseRust(source, lines, rootStart, rootEnd, makeNode);
+  } else if (language === 'c' || language === 'cpp' || language === 'csharp') {
+    return parseCFamily(source, lines, language, rootStart, rootEnd, makeNode);
+  } else if (language === 'java') {
+    return parseJava(source, lines, rootStart, rootEnd, makeNode);
+  } else if (language === 'ruby' || language === 'php') {
+    return parseRubyPhp(source, lines, language, rootStart, rootEnd, makeNode);
+  } else if (language === 'json' || language === 'yaml') {
+    return parseJsonYaml(source, lines, language, rootStart, rootEnd, makeNode);
+  } else if (language === 'markdown' || language === 'html') {
+    return parseMarkdownHtml(source, lines, language, rootStart, rootEnd, makeNode);
   }
 
   // Generic fallback for any language
@@ -263,8 +273,34 @@ function parsePython(
         clsChildren.push(makeNode('argument_list', true, { row: clsStartRow, column: supCol }, { row: clsStartRow, column: supEnd + 1 }, [], 'superclasses'));
       }
 
-      // Class block
-      const blockNode = makeNode('block', true, { row: clsStartRow + 1, column: 0 }, { row: endRow, column: lines[endRow]?.length || 0 }, [], 'body');
+      // Class block and inner members
+      const classBlockChildren: ASTNode[] = [];
+      let k = clsStartRow + 1;
+      while (k <= endRow) {
+        const bl = lines[k];
+        const bt = bl.trim();
+        if (!bt) {
+          k++;
+          continue;
+        }
+        const bIndent = bl.search(/\S/);
+
+        if (/^(?:async\s+)?def\s+/.test(bt)) {
+          const fnMatch = bt.match(/^(?:async\s+)?def\s+([a-zA-Z0-9_]+)/);
+          const fnName = fnMatch ? fnMatch[1] : 'method';
+          const fnNameCol = bl.indexOf(fnName);
+          const fnNameNode = makeNode('identifier', true, { row: k, column: fnNameCol }, { row: k, column: fnNameCol + fnName.length }, [], 'name');
+          const fnNode = makeNode('function_definition', true, { row: k, column: bIndent }, { row: k, column: bl.length }, [fnNameNode]);
+          classBlockChildren.push(fnNode);
+        } else if (bt.startsWith('#')) {
+          classBlockChildren.push(makeNode('comment', false, { row: k, column: bIndent }, { row: k, column: bl.length }));
+        } else {
+          classBlockChildren.push(makeNode('statement', true, { row: k, column: bIndent }, { row: k, column: bl.length }));
+        }
+        k++;
+      }
+
+      const blockNode = makeNode('block', true, { row: clsStartRow + 1, column: 0 }, { row: endRow, column: lines[endRow]?.length || 0 }, classBlockChildren, 'body');
       clsChildren.push(blockNode);
 
       const classNode = makeNode('class_definition', true, { row: clsStartRow, column: colIndent }, { row: endRow, column: lines[endRow]?.length || 0 }, clsChildren);
@@ -469,6 +505,226 @@ function parseRust(
     rootChildren.push(makeNode('statement', true, { row: i, column: colIndent }, { row: i, column: line.length }));
   }
   return makeNode('source_file', true, rootStart, rootEnd, rootChildren);
+}
+
+function parseCFamily(
+  source: string,
+  lines: string[],
+  language: string,
+  rootStart: ASTPosition,
+  rootEnd: ASTPosition,
+  makeNode: (type: string, isNamed: boolean, s: ASTPosition, e: ASTPosition, children?: ASTNode[], field?: string) => ASTNode
+): ASTNode {
+  const rootChildren: ASTNode[] = [];
+  const rootType = language === 'csharp' ? 'compilation_unit' : 'translation_unit';
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const colIndent = line.search(/\S/);
+
+    if (trimmed.startsWith('//') || trimmed.startsWith('/*')) {
+      rootChildren.push(makeNode('comment', false, { row: i, column: colIndent }, { row: i, column: line.length }));
+      continue;
+    }
+    if (trimmed.startsWith('#include') || trimmed.startsWith('#define') || trimmed.startsWith('#pragma') || trimmed.startsWith('using ')) {
+      rootChildren.push(makeNode(language === 'csharp' ? 'using_directive' : 'preproc_include', true, { row: i, column: colIndent }, { row: i, column: line.length }));
+      continue;
+    }
+
+    const classMatch = trimmed.match(/(?:public|private|protected|internal)?\s*(?:class|struct|interface|enum)\s+([a-zA-Z0-9_]+)/);
+    if (classMatch) {
+      const name = classMatch[1];
+      const nameCol = line.indexOf(name);
+      const nameNode = makeNode('type_identifier', true, { row: i, column: nameCol }, { row: i, column: nameCol + name.length }, [], 'name');
+      rootChildren.push(makeNode(trimmed.includes('struct') ? 'struct_specifier' : 'class_declaration', true, { row: i, column: colIndent }, { row: i, column: line.length }, [nameNode]));
+      continue;
+    }
+
+    const funcMatch = trimmed.match(/^(?:[a-zA-Z0-9_<>[\]*&]+\s+)+([a-zA-Z0-9_]+)\s*\((.*?)\)\s*\{?/);
+    if (funcMatch && !trimmed.startsWith('if') && !trimmed.startsWith('for') && !trimmed.startsWith('while') && !trimmed.startsWith('switch') && !trimmed.startsWith('return')) {
+      const name = funcMatch[1];
+      const nameCol = line.indexOf(name);
+      const nameNode = makeNode('identifier', true, { row: i, column: nameCol }, { row: i, column: nameCol + name.length }, [], 'name');
+      rootChildren.push(makeNode('function_definition', true, { row: i, column: colIndent }, { row: i, column: line.length }, [nameNode]));
+      continue;
+    }
+
+    rootChildren.push(makeNode('statement', true, { row: i, column: colIndent }, { row: i, column: line.length }));
+  }
+
+  return makeNode(rootType, true, rootStart, rootEnd, rootChildren);
+}
+
+function parseJava(
+  source: string,
+  lines: string[],
+  rootStart: ASTPosition,
+  rootEnd: ASTPosition,
+  makeNode: (type: string, isNamed: boolean, s: ASTPosition, e: ASTPosition, children?: ASTNode[], field?: string) => ASTNode
+): ASTNode {
+  const rootChildren: ASTNode[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const colIndent = line.search(/\S/);
+
+    if (trimmed.startsWith('//') || trimmed.startsWith('/*')) {
+      rootChildren.push(makeNode('comment', false, { row: i, column: colIndent }, { row: i, column: line.length }));
+      continue;
+    }
+
+    if (trimmed.startsWith('package ') || trimmed.startsWith('import ')) {
+      rootChildren.push(makeNode(trimmed.startsWith('package') ? 'package_declaration' : 'import_declaration', true, { row: i, column: colIndent }, { row: i, column: line.length }));
+      continue;
+    }
+
+    const classMatch = trimmed.match(/(?:public|private|protected|abstract|static|final)*\s*(?:class|interface|enum|record)\s+([a-zA-Z0-9_]+)/);
+    if (classMatch) {
+      const name = classMatch[1];
+      const nameCol = line.indexOf(name);
+      const nameNode = makeNode('identifier', true, { row: i, column: nameCol }, { row: i, column: nameCol + name.length }, [], 'name');
+      rootChildren.push(makeNode(trimmed.includes('interface') ? 'interface_declaration' : 'class_declaration', true, { row: i, column: colIndent }, { row: i, column: line.length }, [nameNode]));
+      continue;
+    }
+
+    const methodMatch = trimmed.match(/(?:public|private|protected|static|final|native|synchronized|\s+)*\s+[a-zA-Z0-9_<>[\]]+\s+([a-zA-Z0-9_]+)\s*\((.*?)\)/);
+    if (methodMatch && !trimmed.startsWith('if') && !trimmed.startsWith('for') && !trimmed.startsWith('while') && !trimmed.startsWith('return')) {
+      const name = methodMatch[1];
+      const nameCol = line.indexOf(name);
+      const nameNode = makeNode('identifier', true, { row: i, column: nameCol }, { row: i, column: nameCol + name.length }, [], 'name');
+      rootChildren.push(makeNode('method_declaration', true, { row: i, column: colIndent }, { row: i, column: line.length }, [nameNode]));
+      continue;
+    }
+
+    rootChildren.push(makeNode('statement', true, { row: i, column: colIndent }, { row: i, column: line.length }));
+  }
+
+  return makeNode('program', true, rootStart, rootEnd, rootChildren);
+}
+
+function parseRubyPhp(
+  source: string,
+  lines: string[],
+  language: string,
+  rootStart: ASTPosition,
+  rootEnd: ASTPosition,
+  makeNode: (type: string, isNamed: boolean, s: ASTPosition, e: ASTPosition, children?: ASTNode[], field?: string) => ASTNode
+): ASTNode {
+  const rootChildren: ASTNode[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const colIndent = line.search(/\S/);
+
+    if (trimmed.startsWith('#') || trimmed.startsWith('//')) {
+      rootChildren.push(makeNode('comment', false, { row: i, column: colIndent }, { row: i, column: line.length }));
+      continue;
+    }
+
+    if (trimmed.startsWith('class ') || trimmed.startsWith('module ') || trimmed.startsWith('namespace ') || /^(?:abstract\s+)?class\s+/.test(trimmed)) {
+      const match = trimmed.match(/(?:class|module|namespace)\s+([a-zA-Z0-9_:\\]+)/);
+      const name = match ? match[1] : 'Class';
+      const nameCol = line.indexOf(name);
+      const nameNode = makeNode('identifier', true, { row: i, column: nameCol }, { row: i, column: nameCol + name.length }, [], 'name');
+      rootChildren.push(makeNode('class_declaration', true, { row: i, column: colIndent }, { row: i, column: line.length }, [nameNode]));
+      continue;
+    }
+
+    if (trimmed.startsWith('def ') || /^(?:public|private|protected)?\s*function\s+/.test(trimmed)) {
+      const match = trimmed.match(/(?:def|function)\s+([a-zA-Z0-9_]+)/);
+      const name = match ? match[1] : 'func';
+      const nameCol = line.indexOf(name);
+      const nameNode = makeNode('identifier', true, { row: i, column: nameCol }, { row: i, column: nameCol + name.length }, [], 'name');
+      rootChildren.push(makeNode('method_declaration', true, { row: i, column: colIndent }, { row: i, column: line.length }, [nameNode]));
+      continue;
+    }
+
+    rootChildren.push(makeNode('statement', true, { row: i, column: colIndent }, { row: i, column: line.length }));
+  }
+
+  return makeNode('program', true, rootStart, rootEnd, rootChildren);
+}
+
+function parseJsonYaml(
+  source: string,
+  lines: string[],
+  language: string,
+  rootStart: ASTPosition,
+  rootEnd: ASTPosition,
+  makeNode: (type: string, isNamed: boolean, s: ASTPosition, e: ASTPosition, children?: ASTNode[], field?: string) => ASTNode
+): ASTNode {
+  const rootChildren: ASTNode[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const colIndent = line.search(/\S/);
+
+    if (trimmed.startsWith('#')) {
+      rootChildren.push(makeNode('comment', false, { row: i, column: colIndent }, { row: i, column: line.length }));
+      continue;
+    }
+
+    // Match pairs on this line, handling JSON braces / quotes e.g. {"name": "test", "version": 1}
+    const pairRegex = /"([a-zA-Z0-9_.-]+)"\s*:\s*([^,{}]+)|([a-zA-Z0-9_.-]+)\s*:\s*(.*)/g;
+    let match;
+    let foundPair = false;
+
+    while ((match = pairRegex.exec(line)) !== null) {
+      const key = match[1] || match[3];
+      const val = match[2] || match[4];
+      const keyIndex = line.indexOf(key, match.index);
+      const keyNode = makeNode('string_scalar', true, { row: i, column: keyIndex }, { row: i, column: keyIndex + key.length }, [], 'key');
+      const valNode = makeNode('value', true, { row: i, column: match.index + match[0].length - (val?.length || 0) }, { row: i, column: match.index + match[0].length }, [], 'value');
+      rootChildren.push(makeNode('pair', true, { row: i, column: match.index }, { row: i, column: match.index + match[0].length }, [keyNode, valNode]));
+      foundPair = true;
+    }
+
+    if (!foundPair) {
+      rootChildren.push(makeNode('value', true, { row: i, column: colIndent }, { row: i, column: line.length }));
+    }
+  }
+
+  return makeNode(language === 'json' ? 'document' : 'stream', true, rootStart, rootEnd, rootChildren);
+}
+
+function parseMarkdownHtml(
+  source: string,
+  lines: string[],
+  language: string,
+  rootStart: ASTPosition,
+  rootEnd: ASTPosition,
+  makeNode: (type: string, isNamed: boolean, s: ASTPosition, e: ASTPosition, children?: ASTNode[], field?: string) => ASTNode
+): ASTNode {
+  const rootChildren: ASTNode[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const colIndent = line.search(/\S/);
+
+    if (trimmed.startsWith('#')) {
+      rootChildren.push(makeNode('heading', true, { row: i, column: colIndent }, { row: i, column: line.length }));
+      continue;
+    }
+
+    if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+      rootChildren.push(makeNode('element', true, { row: i, column: colIndent }, { row: i, column: line.length }));
+      continue;
+    }
+
+    rootChildren.push(makeNode('paragraph', true, { row: i, column: colIndent }, { row: i, column: line.length }));
+  }
+
+  return makeNode('document', true, rootStart, rootEnd, rootChildren);
 }
 
 function parseGeneric(

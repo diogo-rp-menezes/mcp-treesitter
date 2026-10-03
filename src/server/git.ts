@@ -216,3 +216,123 @@ export function initProjectGitRepo(projectPath: string, branchName = 'main'): Gi
 
   return getProjectGitStatus(normalizedPath);
 }
+
+/**
+ * Materializes and syncs files from SQLite store into the project disk directory.
+ */
+export function syncProjectFilesToDisk(
+  projectPath: string,
+  files: Array<{ path: string; content: string }>
+): { syncedCount: number; targetPath: string } {
+  const normalizedPath = path.resolve(projectPath);
+
+  if (!fs.existsSync(normalizedPath)) {
+    fs.mkdirSync(normalizedPath, { recursive: true });
+  }
+
+  let syncedCount = 0;
+  for (const f of files) {
+    const fullFilePath = path.join(normalizedPath, f.path);
+    const dir = path.dirname(fullFilePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(fullFilePath, f.content, 'utf-8');
+    syncedCount++;
+  }
+
+  return { syncedCount, targetPath: normalizedPath };
+}
+
+/**
+ * Stages files for Git commit.
+ */
+export function stageGitFiles(projectPath: string, filePaths?: string[]): GitRepoStatus {
+  const normalizedPath = path.resolve(projectPath);
+  if (!fs.existsSync(normalizedPath)) {
+    throw new Error(`Diretório '${projectPath}' não existe no disco.`);
+  }
+
+  if (filePaths && filePaths.length > 0) {
+    for (const fp of filePaths) {
+      execFileSync('git', ['add', fp], { cwd: normalizedPath, stdio: 'ignore' });
+    }
+  } else {
+    execFileSync('git', ['add', '-A'], { cwd: normalizedPath, stdio: 'ignore' });
+  }
+
+  return getProjectGitStatus(normalizedPath);
+}
+
+/**
+ * Unstages files from Git staging area.
+ */
+export function unstageGitFiles(projectPath: string, filePaths?: string[]): GitRepoStatus {
+  const normalizedPath = path.resolve(projectPath);
+  if (!fs.existsSync(normalizedPath)) {
+    throw new Error(`Diretório '${projectPath}' não existe no disco.`);
+  }
+
+  if (filePaths && filePaths.length > 0) {
+    for (const fp of filePaths) {
+      execFileSync('git', ['restore', '--staged', fp], { cwd: normalizedPath, stdio: 'ignore' });
+    }
+  } else {
+    try {
+      execFileSync('git', ['restore', '--staged', '.'], { cwd: normalizedPath, stdio: 'ignore' });
+    } catch {
+      execFileSync('git', ['reset'], { cwd: normalizedPath, stdio: 'ignore' });
+    }
+  }
+
+  return getProjectGitStatus(normalizedPath);
+}
+
+/**
+ * Creates a Git commit.
+ */
+export function commitGitChanges(projectPath: string, message: string): GitRepoStatus {
+  const normalizedPath = path.resolve(projectPath);
+  if (!fs.existsSync(normalizedPath)) {
+    throw new Error(`Diretório '${projectPath}' não existe no disco.`);
+  }
+
+  const cleanMessage = message.trim();
+  if (!cleanMessage) {
+    throw new Error('A mensagem de commit não pode estar vazia.');
+  }
+
+  // Ensure git user identity
+  try {
+    execFileSync('git', ['config', 'user.name', 'AI Studio'], { cwd: normalizedPath, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'dev@aistudio.local'], { cwd: normalizedPath, stdio: 'ignore' });
+  } catch {
+    // ignore
+  }
+
+  execFileSync('git', ['commit', '-m', cleanMessage], { cwd: normalizedPath, stdio: 'ignore' });
+  return getProjectGitStatus(normalizedPath);
+}
+
+/**
+ * Switches or creates a Git branch.
+ */
+export function switchGitBranch(projectPath: string, branchName: string, createNew = false): GitRepoStatus {
+  const normalizedPath = path.resolve(projectPath);
+  if (!fs.existsSync(normalizedPath)) {
+    throw new Error(`Diretório '${projectPath}' não existe no disco.`);
+  }
+
+  const safeBranch = branchName.trim();
+  if (!/^[a-zA-Z0-9._/-]+$/.test(safeBranch)) {
+    throw new Error(`Nome de branch inválido: '${branchName}'.`);
+  }
+
+  if (createNew) {
+    execFileSync('git', ['checkout', '-b', safeBranch], { cwd: normalizedPath, stdio: 'ignore' });
+  } else {
+    execFileSync('git', ['checkout', safeBranch], { cwd: normalizedPath, stdio: 'ignore' });
+  }
+
+  return getProjectGitStatus(normalizedPath);
+}

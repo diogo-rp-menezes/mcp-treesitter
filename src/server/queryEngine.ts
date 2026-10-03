@@ -1,17 +1,31 @@
 import { ASTNode, QueryCapture, QueryMatch } from './types';
 
-interface QueryPattern {
+export type PredicateType = 'eq' | 'not-eq' | 'match' | 'not-match' | 'any-of';
+
+export interface QueryPredicate {
+  type: PredicateType;
+  capture: string;
+  value?: string;
+  values?: string[];
+  otherCapture?: string;
+  regex?: RegExp;
+}
+
+export interface QueryPattern {
   targetNodeType: string;
   field?: string;
+  negatedFields: string[];
+  quantifier: '+' | '*' | '?' | '1';
   captureName?: string;
   childPatterns: QueryPattern[];
-  predicates: Array<{ type: 'eq'; capture: string; value: string }>;
+  predicates: QueryPredicate[];
+  isImmediateChild?: boolean;
 }
 
 export function parseSExpressionQuery(queryString: string): QueryPattern[] {
   const patterns: QueryPattern[] = [];
 
-  // Remove comment lines starting with ';'
+  // Remove comments (lines starting with ';')
   const cleaned = queryString
     .split('\n')
     .map((line) => line.replace(/;.*$/, ''))
@@ -26,7 +40,7 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
     working = working.slice(1, -1).trim();
   }
 
-  // Tokenize parentheses, identifiers, captures @foo, and strings
+  // Tokenize parentheses, identifiers, captures @foo, strings, and predicates #foo
   const tokens: string[] = [];
   let idx = 0;
   while (idx < working.length) {
@@ -35,7 +49,7 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
       idx++;
       continue;
     }
-    if (ch === '(' || ch === ')' || ch === '[' || ch === ']') {
+    if (ch === '(' || ch === ')' || ch === '[' || ch === ']' || ch === '.') {
       tokens.push(ch);
       idx++;
       continue;
@@ -57,7 +71,7 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
       continue;
     }
 
-    // Read word/symbol
+    // Read identifier/word/predicate/quantified symbol
     let word = '';
     while (idx < working.length && !/\s|\(|\)|\[|\]/.test(working[idx])) {
       word += working[idx];
@@ -88,8 +102,24 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
     const first = toks[pos];
     pos++; // consume node type
 
+    let targetNodeType = first || '*';
+    let quantifier: '+' | '*' | '?' | '1' = '1';
+
+    if (targetNodeType.endsWith('+')) {
+      quantifier = '+';
+      targetNodeType = targetNodeType.slice(0, -1);
+    } else if (targetNodeType.endsWith('*')) {
+      quantifier = '*';
+      targetNodeType = targetNodeType.slice(0, -1);
+    } else if (targetNodeType.endsWith('?')) {
+      quantifier = '?';
+      targetNodeType = targetNodeType.slice(0, -1);
+    }
+
     const pattern: QueryPattern = {
-      targetNodeType: first?.replace('?', '') || '*',
+      targetNodeType: targetNodeType || '*',
+      quantifier,
+      negatedFields: [],
       childPatterns: [],
       predicates: [],
     };
@@ -97,6 +127,42 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
     while (pos < toks.length && toks[pos] !== ')') {
       const current = toks[pos];
 
+      // Immediate child sibling anchor (.)
+      if (current === '.') {
+        pos++;
+        if (pos < toks.length && toks[pos] === '(') {
+          const child = parsePatternNode(toks);
+          if (child) {
+            child.isImmediateChild = true;
+            pattern.childPatterns.push(child);
+          }
+        }
+        continue;
+      }
+
+      // Check if parentheses encapsulate a predicate e.g. (#match? @fn "^get_")
+      if (current === '(' && toks[pos + 1]?.startsWith('#')) {
+        pos++; // consume '('
+        parsePredicate(pattern, toks);
+        if (pos < toks.length && toks[pos] === ')') {
+          pos++; // consume ')'
+        }
+        continue;
+      }
+
+      // Check if parentheses encapsulate a negated field e.g. (!parameters)
+      if (current === '(' && toks[pos + 1]?.startsWith('!')) {
+        pos++; // consume '('
+        const negField = (toks[pos] || '').slice(1);
+        if (negField) pattern.negatedFields.push(negField);
+        pos++;
+        if (pos < toks.length && toks[pos] === ')') {
+          pos++; // consume ')'
+        }
+        continue;
+      }
+
+      // Child sub-pattern
       if (current === '(') {
         const child = parsePatternNode(toks);
         if (child) {
@@ -105,8 +171,16 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
         continue;
       }
 
+      // Negated field (!field)
+      if (current.startsWith('!')) {
+        const negField = current.slice(1);
+        if (negField) pattern.negatedFields.push(negField);
+        pos++;
+        continue;
+      }
+
+      // Named field (field_name:)
       if (current.endsWith(':')) {
-        // Field name
         const fieldName = current.slice(0, -1);
         pos++;
         if (pos < toks.length && toks[pos] === '(') {
@@ -119,19 +193,16 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
         continue;
       }
 
+      // Capture name (@func.name)
       if (current.startsWith('@')) {
         pattern.captureName = current.slice(1);
         pos++;
         continue;
       }
 
-      if (current.startsWith('#eq?')) {
-        pos++;
-        const cap = toks[pos]?.startsWith('@') ? toks[pos].slice(1) : toks[pos];
-        pos++;
-        const val = toks[pos]?.replace(/^"|"$/g, '') || '';
-        pos++;
-        pattern.predicates.push({ type: 'eq', capture: cap, value: val });
+      // Bare predicates without parentheses e.g. #match? @fn "^get_"
+      if (current.startsWith('#')) {
+        parsePredicate(pattern, toks);
         continue;
       }
 
@@ -142,13 +213,75 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
       pos++; // consume ')'
     }
 
-    // Check if trailing @capture exists after closing paren
+    // Check if trailing quantifier exists after closing paren e.g. (statement)+
+    if (pos < toks.length && (toks[pos] === '+' || toks[pos] === '*' || toks[pos] === '?')) {
+      pattern.quantifier = toks[pos] as '+' | '*' | '?';
+      pos++;
+    }
+
+    // Check if trailing @capture exists after closing paren e.g. (identifier) @name
     if (pos < toks.length && toks[pos]?.startsWith('@')) {
       pattern.captureName = toks[pos].slice(1);
       pos++;
     }
 
     return pattern;
+  }
+
+  function parsePredicate(pattern: QueryPattern, toks: string[]) {
+    const predName = toks[pos];
+    pos++;
+
+    if (predName === '#eq?' || predName === '#not-eq?') {
+      const cap = (toks[pos] || '').replace(/^@/, '');
+      pos++;
+      const valToken = toks[pos] || '';
+      pos++;
+
+      if (valToken.startsWith('@')) {
+        // Comparison between two captures: (#eq? @c1 @c2)
+        pattern.predicates.push({
+          type: predName === '#eq?' ? 'eq' : 'not-eq',
+          capture: cap,
+          otherCapture: valToken.slice(1),
+        });
+      } else {
+        // Comparison between capture and string literal
+        pattern.predicates.push({
+          type: predName === '#eq?' ? 'eq' : 'not-eq',
+          capture: cap,
+          value: valToken.replace(/^"|"$/g, ''),
+        });
+      }
+    } else if (predName === '#match?' || predName === '#not-match?') {
+      const cap = (toks[pos] || '').replace(/^@/, '');
+      pos++;
+      const patternStr = (toks[pos] || '').replace(/^"|"$/g, '');
+      pos++;
+      try {
+        pattern.predicates.push({
+          type: predName === '#match?' ? 'match' : 'not-match',
+          capture: cap,
+          value: patternStr,
+          regex: new RegExp(patternStr),
+        });
+      } catch {
+        // ignore invalid regex
+      }
+    } else if (predName === '#any-of?') {
+      const cap = (toks[pos] || '').replace(/^@/, '');
+      pos++;
+      const allowedValues: string[] = [];
+      while (
+        pos < toks.length &&
+        (toks[pos].startsWith('"') ||
+          (!toks[pos].startsWith('#') && !toks[pos].startsWith('(') && toks[pos] !== ')'))
+      ) {
+        allowedValues.push(toks[pos].replace(/^"|"$/g, ''));
+        pos++;
+      }
+      pattern.predicates.push({ type: 'any-of', capture: cap, values: allowedValues });
+    }
   }
 
   return patterns;
@@ -175,6 +308,14 @@ export function executeQuery(
       return null;
     }
 
+    // Check negated fields (!field)
+    for (const negField of pattern.negatedFields) {
+      const hasNegatedField = node.children.some((c) => c.field === negField);
+      if (hasNegatedField) {
+        return null;
+      }
+    }
+
     const captures: QueryCapture[] = [];
 
     if (pattern.captureName) {
@@ -189,28 +330,83 @@ export function executeQuery(
 
     // Check child patterns
     for (const cp of pattern.childPatterns) {
-      let childMatched = false;
+      let matchedCount = 0;
+
+      function matchInSubtree(parent: ASTNode): QueryCapture[] | null {
+        for (const childNode of parent.children) {
+          const subCaps = matchPatternOnNode(cp, childNode);
+          if (subCaps) return subCaps;
+          if (childNode.type === 'block' || childNode.type === 'statement_block' || childNode.type === 'body') {
+            const nestedCaps = matchInSubtree(childNode);
+            if (nestedCaps) return nestedCaps;
+          }
+        }
+        return null;
+      }
+
       for (const childNode of node.children) {
         const subCaps = matchPatternOnNode(cp, childNode);
         if (subCaps) {
           captures.push(...subCaps);
-          childMatched = true;
-          break;
+          matchedCount++;
+          if (cp.quantifier !== '*' && cp.quantifier !== '+') {
+            break;
+          }
+        } else if (childNode.type === 'block' || childNode.type === 'statement_block') {
+          const nestedCaps = matchInSubtree(childNode);
+          if (nestedCaps) {
+            captures.push(...nestedCaps);
+            matchedCount++;
+            if (cp.quantifier !== '*' && cp.quantifier !== '+') {
+              break;
+            }
+          }
         }
       }
-      if (!childMatched && !cp.targetNodeType.includes('?')) {
-        // Child requirement not met
-        return null;
+
+      if (matchedCount === 0) {
+        if (cp.quantifier === '+' || cp.quantifier === '1') {
+          // Required child node was not present
+          return null;
+        }
       }
     }
 
-    // Predicates
+    // Predicates evaluation
     for (const pred of pattern.predicates) {
-      if (pred.type === 'eq') {
-        const found = captures.find((c) => c.capture === pred.capture);
-        if (!found || found.text !== pred.value) {
-          return null;
-        }
+      const found = captures.find((c) => c.capture === pred.capture);
+      const targetText = found ? found.text : '';
+
+      switch (pred.type) {
+        case 'eq':
+          if (pred.otherCapture) {
+            const otherFound = captures.find((c) => c.capture === pred.otherCapture);
+            if (!found || !otherFound || targetText !== otherFound.text) return null;
+          } else {
+            if (!found || targetText !== pred.value) return null;
+          }
+          break;
+
+        case 'not-eq':
+          if (pred.otherCapture) {
+            const otherFound = captures.find((c) => c.capture === pred.otherCapture);
+            if (found && otherFound && targetText === otherFound.text) return null;
+          } else {
+            if (found && targetText === pred.value) return null;
+          }
+          break;
+
+        case 'match':
+          if (!found || !pred.regex || !pred.regex.test(targetText)) return null;
+          break;
+
+        case 'not-match':
+          if (found && pred.regex && pred.regex.test(targetText)) return null;
+          break;
+
+        case 'any-of':
+          if (!found || !pred.values || !pred.values.includes(targetText)) return null;
+          break;
       }
     }
 

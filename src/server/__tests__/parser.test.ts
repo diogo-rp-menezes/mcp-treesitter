@@ -54,4 +54,24 @@ describe('Tree-sitter Parser Engine', () => {
     expect(node?.type).toBe('identifier');
     expect(node?.text).toBe('run');
   });
+
+  it('parses C#, Java and JSON into rich AST nodes', () => {
+    // C#
+    const csCode = `public class Program {\n    public void Run() {}\n}`;
+    const csAst = parseSourceToAST(csCode, 'csharp');
+    expect(csAst.type).toBe('compilation_unit');
+    expect(csAst.children.some((c) => c.type === 'class_declaration')).toBe(true);
+
+    // Java
+    const javaCode = `package com.app;\npublic class Service {\n    public int calc() { return 1; }\n}`;
+    const javaAst = parseSourceToAST(javaCode, 'java');
+    expect(javaAst.children.some((c) => c.type === 'package_declaration')).toBe(true);
+    expect(javaAst.children.some((c) => c.type === 'class_declaration')).toBe(true);
+
+    // JSON
+    const jsonCode = `{"name": "test", "version": 1}`;
+    const jsonAst = parseSourceToAST(jsonCode, 'json');
+    expect(jsonAst.type).toBe('document');
+    expect(jsonAst.children.some((c) => c.type === 'pair')).toBe(true);
+  });
 });

@@ -2,6 +2,7 @@ import { Project, ProjectFile } from './types';
 import { detectLanguage, parseSourceToAST, extractSymbolsFromAST } from './parser';
 import { calculateComplexity } from './complexity';
 import { validateAndResolvePath, normalizePath, auditProjectIsolation } from './isolation';
+import { sqliteStorage } from './db';
 
 const projects = new Map<string, Project>();
 
@@ -217,10 +218,28 @@ function addFileToProject(project: Project, path: string, content: string): Proj
     lastModified: new Date().toISOString(),
   };
   project.files.set(path, file);
+  try {
+    sqliteStorage.saveFile(project.name, path, file.language, file.content, file.sizeBytes);
+  } catch (err) {
+    console.error(`Failed to persist file ${path} to SQLite:`, err);
+  }
   return file;
 }
 
-initDefaultProjects();
+function initStore() {
+  try {
+    const loaded = sqliteStorage.loadAllProjects();
+    if (loaded) {
+      for (const [name, p] of loaded) {
+        projects.set(name, p);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load projects from SQLite:', err);
+  }
+}
+
+initStore();
 
 export const projectStore = {
   listProjects(): Array<{ name: string; path: string; description?: string; fileCount: number }> {
@@ -354,11 +373,101 @@ export const projectStore = {
       files: new Map(),
     };
     projects.set(name, proj);
+    try {
+      sqliteStorage.saveProject(name, cleanPath, proj.description || '');
+    } catch (err) {
+      console.error(`Failed to persist project ${name} to SQLite:`, err);
+    }
     return proj;
   },
 
+  updateProject(
+    oldName: string,
+    updates: { name?: string; path?: string; description?: string }
+  ): Project {
+    const proj = projects.get(oldName);
+    if (!proj) {
+      throw new Error(`Projeto '${oldName}' não encontrado.`);
+    }
+
+    const newName = updates.name ? updates.name.trim() : proj.name;
+    const newPath = updates.path ? normalizePath(updates.path.trim()) : proj.path;
+    const newDesc = updates.description !== undefined ? updates.description : (proj.description || '');
+
+    // Persist changes in SQLite
+    sqliteStorage.updateProject(oldName, {
+      name: newName,
+      path: newPath,
+      description: newDesc,
+    });
+
+    if (newName !== oldName) {
+      // Re-key in memory Map
+      projects.delete(oldName);
+      proj.name = newName;
+      proj.path = newPath;
+      proj.description = newDesc;
+      projects.set(newName, proj);
+    } else {
+      proj.path = newPath;
+      proj.description = newDesc;
+    }
+
+    return proj;
+  },
+
+  cloneProject(
+    sourceName: string,
+    targetName: string,
+    targetPath?: string,
+    targetDescription?: string
+  ): Project {
+    const sourceProj = projects.get(sourceName);
+    if (!sourceProj) {
+      throw new Error(`Projeto '${sourceName}' não encontrado para clonagem.`);
+    }
+
+    if (projects.has(targetName)) {
+      throw new Error(`Já existe um projeto com o nome '${targetName}'.`);
+    }
+
+    const cleanPath = normalizePath(targetPath || `/projects/${targetName}`);
+    const cleanDesc = targetDescription !== undefined ? targetDescription : `Clone de ${sourceName}`;
+
+    // Clone in SQLite
+    sqliteStorage.cloneProject(sourceName, targetName, cleanPath, cleanDesc);
+
+    // Clone in memory
+    const clonedFiles = new Map<string, ProjectFile>();
+    for (const [filePath, fileObj] of sourceProj.files.entries()) {
+      clonedFiles.set(filePath, {
+        path: fileObj.path,
+        language: fileObj.language,
+        content: fileObj.content,
+        sizeBytes: fileObj.sizeBytes,
+        lastModified: new Date().toISOString(),
+      });
+    }
+
+    const clonedProj: Project = {
+      name: targetName,
+      path: cleanPath,
+      description: cleanDesc,
+      files: clonedFiles,
+    };
+
+    projects.set(targetName, clonedProj);
+    return clonedProj;
+  },
+
   removeProject(name: string): boolean {
-    return projects.delete(name);
+    const deleted = projects.delete(name);
+    try {
+      sqliteStorage.deleteProject(name);
+    } catch (err) {
+      console.error(`Failed to delete project ${name} from SQLite:`, err);
+    }
+    return deleted;
   },
 
   listFiles(projectName: string, pattern?: string, extensions?: string[]): string[] {
@@ -399,13 +508,62 @@ export const projectStore = {
     return addFileToProject(p, relativePath, content);
   },
 
+  saveFilesBatch(projectName: string, files: Array<{ path: string; content: string }>): number {
+    let p = projects.get(projectName);
+    if (!p) {
+      p = this.createProject(projectName);
+    }
+
+    const batchToPersist: Array<{ path: string; language: string; content: string; sizeBytes: number }> = [];
+
+    for (const item of files) {
+      try {
+        const { relativePath } = validateAndResolvePath(p, item.path);
+        const lang = detectLanguage(relativePath);
+        const sizeBytes = Buffer.byteLength(item.content, 'utf-8');
+        const projFile: ProjectFile = {
+          path: relativePath,
+          language: lang,
+          content: item.content,
+          sizeBytes,
+          lastModified: new Date().toISOString(),
+        };
+        p.files.set(relativePath, projFile);
+        batchToPersist.push({
+          path: relativePath,
+          language: lang,
+          content: item.content,
+          sizeBytes,
+        });
+      } catch {
+        // Skip paths failing isolation
+      }
+    }
+
+    if (batchToPersist.length > 0) {
+      try {
+        sqliteStorage.saveFilesBatch(projectName, batchToPersist);
+      } catch (err) {
+        console.error(`Failed to batch persist files for project ${projectName} to SQLite:`, err);
+      }
+    }
+
+    return batchToPersist.length;
+  },
+
   deleteFile(projectName: string, filePath: string): boolean {
     const p = projects.get(projectName);
     if (!p) return false;
 
     // Validate path boundary
     const { relativePath } = validateAndResolvePath(p, filePath);
-    return p.files.delete(relativePath);
+    const deleted = p.files.delete(relativePath);
+    try {
+      sqliteStorage.deleteFile(projectName, relativePath);
+    } catch (err) {
+      console.error(`Failed to delete file ${relativePath} from SQLite:`, err);
+    }
+    return deleted;
   },
 
   auditIsolation(projectName: string) {
