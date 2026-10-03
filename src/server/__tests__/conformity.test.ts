@@ -10,6 +10,7 @@ import {
 } from '../operations';
 import { executeQueryOnSource } from '../queryEngine';
 import { Project, ProjectFile } from '../types';
+import { QueryError, LanguageNotFoundError } from '../errors';
 
 describe('Tree-sitter WASM Engine Conformity & Diagnostics', () => {
   beforeAll(async () => {
@@ -81,6 +82,16 @@ def broken_fn(a, b
       expect(firstErr?.startPosition).toBeDefined();
       expect(firstErr?.endPosition).toBeDefined();
     });
+
+    it('does not announce broken wasm languages and rejects them with LanguageNotFoundError', () => {
+      const available = languageRegistry.listAvailableLanguages();
+      expect(available).not.toContain('yaml');
+      expect(available).not.toContain('dart');
+      expect(available).not.toContain('elm');
+
+      expect(() => languageRegistry.resolveLanguageOrThrow('yaml')).toThrow(LanguageNotFoundError);
+      expect(() => languageRegistry.resolveLanguageOrThrow('dart')).toThrow(LanguageNotFoundError);
+    });
   });
 
   describe('P0.3: Multi-language Grammar Conformity', () => {
@@ -109,7 +120,7 @@ def broken_fn(a, b
     }
   });
 
-  describe('P1.2: Native Query Execution with Predicates', () => {
+  describe('P1.2: Native Query Execution with Predicates & Error Handling', () => {
     it('executes native S-expression queries with captures', async () => {
       const code = `
 def add(a, b):
@@ -127,6 +138,13 @@ def subtract(a, b):
       expect(matches.length).toBe(2);
       expect(matches[0].captures?.some((c) => c.text === 'add')).toBe(true);
       expect(matches[1].captures?.some((c) => c.text === 'subtract')).toBe(true);
+    });
+
+    it('throws QueryError with descriptive tree-sitter error message for invalid queries', async () => {
+      const code = `def test(): pass`;
+      await expect(
+        executeQueryOnSource(code, 'python', '(function_definition (non_existent_node) @x)')
+      ).rejects.toThrow(QueryError);
     });
   });
 
@@ -160,6 +178,22 @@ export function createService(): UserService {
         lastModified: new Date().toISOString(),
       });
 
+      files.set('src/references.js', {
+        path: 'src/references.js',
+        language: 'javascript',
+        content: `
+function foo() {}
+class MyClass {
+  foo() { return 1; }
+}
+const obj = { foo: 123, bar: foo() };
+console.log(obj.foo);
+const { foo } = obj;
+`,
+        sizeBytes: 150,
+        lastModified: new Date().toISOString(),
+      });
+
       return {
         name: 'test-llm-proj',
         path: '/mock/llm-project',
@@ -167,7 +201,7 @@ export function createService(): UserService {
       };
     }
 
-    it('getOutline generates compact signature map for token savings', async () => {
+    it('getOutline generates compact signature map with valid offsets', async () => {
       const proj = createTestProject();
       const outline = await getOutline(proj, 'src/user.ts', languageRegistry);
 
@@ -176,6 +210,7 @@ export function createService(): UserService {
       expect(names).toContain('UserService');
       expect(names).toContain('UserProfile');
       expect(names).toContain('createService');
+      expect(outline[0].endByte).toBeGreaterThan(0);
     });
 
     it('getSymbolSource slices exact byte ranges', async () => {
@@ -188,25 +223,47 @@ export function createService(): UserService {
       expect(symbol?.source).toContain('return new UserService();');
     });
 
-    it('findReferences discovers identifier usages', async () => {
+    it('findReferences discovers all identifier usages including properties and methods', async () => {
       const proj = createTestProject();
-      const refs = await findReferences(proj, 'UserService', 'typescript', languageRegistry);
+      const refs = await findReferences(proj, 'foo', 'javascript', languageRegistry);
 
-      expect(refs.length).toBeGreaterThan(0);
-      expect(refs.some((r) => r.file === 'src/user.ts')).toBe(true);
+      // Function definition, method definition, object property, call, member access, shorthand pattern
+      expect(refs.length).toBe(6);
+      expect(refs.every((r) => r.startByte >= 0 && r.endByte > r.startByte)).toBe(true);
     });
 
-    it('safeReplaceNode rejects edits that introduce syntax errors', async () => {
+    it('safeReplaceNode handles UTF-8 unicode/emojis and rejects edits with syntax errors', async () => {
       const proj = createTestProject();
-      const targetStart = 10;
-      const targetEnd = 25;
+      const unicodeFile = `// Comentário com acentuação: Olá mundo! 🚀\nfunction greet() {\n  return "Olá";\n}\n`;
+      proj.files.set('src/unicode.js', {
+        path: 'src/unicode.js',
+        language: 'javascript',
+        content: unicodeFile,
+        sizeBytes: Buffer.byteLength(unicodeFile, 'utf8'),
+        lastModified: new Date().toISOString(),
+      });
 
-      // Bad replacement introducing syntax error
+      // Valid replacement inside greet
+      const start = unicodeFile.indexOf('return "Olá";');
+      const end = start + 'return "Olá";'.length;
+      const validResult = await safeReplaceNode(
+        proj,
+        'src/unicode.js',
+        start,
+        end,
+        'return "Tudo bem! 🎉";',
+        languageRegistry
+      );
+
+      expect(validResult.success).toBe(true);
+      expect(validResult.newContent).toContain('Tudo bem! 🎉');
+
+      // Invalid replacement introducing syntax error
       const badResult = await safeReplaceNode(
         proj,
         'src/user.ts',
-        targetStart,
-        targetEnd,
+        10,
+        25,
         'interface Broken { { { }',
         languageRegistry
       );

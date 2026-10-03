@@ -31,7 +31,7 @@ import { TreeCache, treeCache as defaultTreeCache } from './treeCache';
 import { validateFileAccess } from './security';
 import { syntaxNodeToASTNode, collectSyntaxErrors, parseRawTree } from './treeSitter';
 import { DEFAULT_SYMBOL_TYPES, TEMPLATES } from './templates';
-import { executeNativeQuery } from './queryEngine';
+import { executeNativeQuery, getIdentifierQueryForLanguage } from './queryEngine';
 import { calculateComplexity, collectAstMetrics, countLines } from './complexity';
 import { FileAccessError, QueryError, LanguageNotFoundError } from './errors';
 
@@ -117,6 +117,10 @@ export async function extractSymbols(
           name,
           type: 'classes',
           location: { start: node.startPoint, end: node.endPoint },
+          startByte: node.startByte,
+          endByte: node.endByte,
+          start_byte: node.startByte,
+          end_byte: node.endByte,
           startLine: node.startPoint.row,
           endLine: node.endPoint.row,
           startColumn: node.startPoint.column,
@@ -157,6 +161,10 @@ export async function extractSymbols(
             name,
             type: 'functions',
             location: { start: node.startPoint, end: node.endPoint },
+            startByte: node.startByte,
+            endByte: node.endByte,
+            start_byte: node.startByte,
+            end_byte: node.endByte,
             startLine: node.startPoint.row,
             endLine: node.endPoint.row,
             startColumn: node.startPoint.column,
@@ -182,6 +190,10 @@ export async function extractSymbols(
         name: nameNode?.text || 'AnonymousStruct',
         type: 'structs',
         location: { start: node.startPoint, end: node.endPoint },
+        startByte: node.startByte,
+        endByte: node.endByte,
+        start_byte: node.startByte,
+        end_byte: node.endByte,
         startLine: node.startPoint.row,
         endLine: node.endPoint.row,
         startColumn: node.startPoint.column,
@@ -197,6 +209,10 @@ export async function extractSymbols(
         name: nameNode?.text || 'AnonymousInterface',
         type: 'interfaces',
         location: { start: node.startPoint, end: node.endPoint },
+        startByte: node.startByte,
+        endByte: node.endByte,
+        start_byte: node.startByte,
+        end_byte: node.endByte,
         startLine: node.startPoint.row,
         endLine: node.endPoint.row,
         startColumn: node.startPoint.column,
@@ -209,6 +225,10 @@ export async function extractSymbols(
         name: node.text || '',
         type: 'imports',
         location: { start: node.startPoint, end: node.endPoint },
+        startByte: node.startByte,
+        endByte: node.endByte,
+        start_byte: node.startByte,
+        end_byte: node.endByte,
         startLine: node.startPoint.row,
         endLine: node.endPoint.row,
         startColumn: node.startPoint.column,
@@ -703,9 +723,9 @@ export async function getOutline(
     items.push({
       name: cls.name,
       kind: 'class',
-      location: cls.location,
-      startByte: 0,
-      endByte: 0,
+      location: cls.location || { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } },
+      startByte: cls.startByte ?? 0,
+      endByte: cls.endByte ?? 0,
       children: [],
     });
   }
@@ -715,9 +735,9 @@ export async function getOutline(
       name: fn.name,
       kind: fn.metadata?.parent ? 'method' : 'function',
       signature: fn.metadata?.signature || fn.name,
-      location: fn.location,
-      startByte: 0,
-      endByte: 0,
+      location: fn.location || { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } },
+      startByte: fn.startByte ?? 0,
+      endByte: fn.endByte ?? 0,
     });
   }
 
@@ -725,9 +745,9 @@ export async function getOutline(
     items.push({
       name: iface.name,
       kind: 'interface',
-      location: iface.location,
-      startByte: 0,
-      endByte: 0,
+      location: iface.location || { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } },
+      startByte: iface.startByte ?? 0,
+      endByte: iface.endByte ?? 0,
     });
   }
 
@@ -801,7 +821,17 @@ export async function getSymbolSource(
 }
 
 /**
- * P2.3: Find identifier references across project files
+ * Converts a byte offset to a UTF-16 character index in a UTF-8 string.
+ */
+function byteOffsetToCharIndex(str: string, byteOffset: number): number {
+  if (byteOffset <= 0) return 0;
+  const buf = Buffer.from(str, 'utf8');
+  if (byteOffset >= buf.length) return str.length;
+  return buf.subarray(0, byteOffset).toString('utf8').length;
+}
+
+/**
+ * P2.3: Find identifier references across project files with accurate ranges
  */
 export async function findReferences(
   project: Project,
@@ -818,7 +848,7 @@ export async function findReferences(
     const parsed = await defaultTreeCache.getOrParseTree(file.content, fLang);
     if (!parsed) continue;
 
-    const queryStr = `(identifier) @ref`;
+    const queryStr = getIdentifierQueryForLanguage(parsed.tsLanguage);
     try {
       const matches = executeNativeQuery(parsed.tree, parsed.tsLanguage, queryStr);
       for (const m of matches) {
@@ -830,8 +860,8 @@ export async function findReferences(
               file: filePath,
               name: symbolName,
               location: cap.location || { start: cap.startPoint, end: cap.endPoint },
-              startByte: 0,
-              endByte: 0,
+              startByte: cap.startByte ?? 0,
+              endByte: cap.endByte ?? 0,
               contextLine: lineText.trim(),
             });
           }
@@ -854,7 +884,8 @@ export async function safeReplaceNode(
   startByte: number,
   endByte: number,
   replacementText: string,
-  langRegistry: LanguageRegistry = defaultLanguageRegistry
+  langRegistry: LanguageRegistry = defaultLanguageRegistry,
+  options?: { isByteOffset?: boolean }
 ): Promise<{ success: boolean; newContent: string; newErrors: SyntaxDiagnostic[]; message: string }> {
   validateFileAccess(filePath, project.path);
   const file = project.files.get(filePath);
@@ -866,7 +897,16 @@ export async function safeReplaceNode(
   const oldParsed = await defaultTreeCache.getOrParseTree(file.content, canonicalLang);
   const oldErrors = oldParsed ? collectSyntaxErrors(oldParsed.tree.rootNode) : [];
 
-  const newContent = file.content.slice(0, startByte) + replacementText + file.content.slice(endByte);
+  let startIdx = startByte;
+  let endIdx = endByte;
+
+  // Support both UTF-16 character offsets (tree-sitter default) and byte offsets
+  if (options?.isByteOffset || startByte > file.content.length || endByte > file.content.length) {
+    startIdx = byteOffsetToCharIndex(file.content, startByte);
+    endIdx = byteOffsetToCharIndex(file.content, endByte);
+  }
+
+  const newContent = file.content.slice(0, startIdx) + replacementText + file.content.slice(endIdx);
 
   const newParsed = await parseRawTree(newContent, canonicalLang);
   if (!newParsed) {

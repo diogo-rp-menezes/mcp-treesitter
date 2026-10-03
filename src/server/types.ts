@@ -119,6 +119,10 @@ export interface Symbol {
   name: string;
   type: SymbolType;
   location?: Location;
+  startByte?: number;
+  endByte?: number;
+  start_byte?: number;
+  end_byte?: number;
   metadata?: SymbolMetadata;
   // Legacy compatibility fields
   startLine?: number;
@@ -139,6 +143,10 @@ export interface QueryCapture {
   nodeType: string;
   startPoint: ASTPosition;
   endPoint: ASTPosition;
+  startByte?: number;
+  endByte?: number;
+  start_byte?: number;
+  end_byte?: number;
   location?: Location;
   node_type?: string;
 }

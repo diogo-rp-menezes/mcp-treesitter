@@ -6,6 +6,7 @@
 import Parser from 'web-tree-sitter';
 import { ASTNode, QueryCapture, QueryMatch } from './types';
 import { treeCache } from './treeCache';
+import { QueryError } from './errors';
 
 export type PredicateType = 'eq' | 'not-eq' | 'match' | 'not-match' | 'any-of';
 
@@ -371,15 +372,13 @@ export function executeNativeQuery(
   const maxResults = options?.maxResults ?? 100;
   const captureFilter = options?.captureFilter;
 
-  let query: Parser.Query | null = null;
+  let query: Parser.Query;
   try {
     query = tsLanguage.query(queryString);
-  } catch {
-    // If native S-expression syntax has custom extensions, fallback to AST matcher
-    const ast = treeCache.get(tree.rootNode.text, 'current')
-      ? null
-      : null;
-    return [];
+  } catch (err: any) {
+    throw new QueryError(err?.message || 'Invalid tree-sitter query pattern', {
+      query: queryString,
+    });
   }
 
   const results: QueryMatch[] = [];
@@ -412,6 +411,10 @@ export function executeNativeQuery(
             row: node.endPosition.row,
             column: node.endPosition.column,
           },
+          startByte: node.startIndex,
+          endByte: node.endIndex,
+          start_byte: node.startIndex,
+          end_byte: node.endIndex,
           location: {
             start: { row: node.startPosition.row, column: node.startPosition.column },
             end: { row: node.endPosition.row, column: node.endPosition.column },
@@ -437,6 +440,39 @@ export function executeNativeQuery(
   }
 
   return results;
+}
+
+/**
+ * Builds a valid tree-sitter S-expression query for identifiers supported by the language.
+ */
+export function getIdentifierQueryForLanguage(tsLanguage: Parser.Language): string {
+  const candidateIdentifierTypes = [
+    'identifier',
+    'property_identifier',
+    'private_property_identifier',
+    'shorthand_property_identifier',
+    'shorthand_property_identifier_pattern',
+    'type_identifier',
+    'field_identifier',
+    'package_identifier',
+    'statement_identifier',
+    'variable_name',
+  ];
+
+  const languageTypes: string[] = (tsLanguage as any).types || [];
+  const presentTypes = candidateIdentifierTypes.filter((type) => {
+    return languageTypes.includes(type);
+  });
+
+  if (presentTypes.length === 0) {
+    return '(identifier) @ref';
+  }
+
+  if (presentTypes.length === 1) {
+    return `(${presentTypes[0]}) @ref`;
+  }
+
+  return `[\n${presentTypes.map((t) => `  (${t})`).join('\n')}\n] @ref`;
 }
 
 /**

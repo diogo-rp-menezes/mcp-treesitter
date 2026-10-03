@@ -12,7 +12,7 @@ import {
   findNodeAtPosition,
 } from './src/server/parser';
 import { initTreeSitter } from './src/server/treeSitter';
-import { executeQuery } from './src/server/queryEngine';
+import { executeQuery, executeQueryOnSource } from './src/server/queryEngine';
 import { calculateComplexity } from './src/server/complexity';
 import { findSimilarCodeBlocks } from './src/server/similarity';
 import { TEMPLATES, COMMON_NODE_DESCRIPTIONS } from './src/server/templates';
@@ -24,7 +24,7 @@ import {
   searchText,
 } from './src/server/operations';
 import { adaptQuery, buildCompoundQuery } from './src/server/queryBuilder';
-import { MCPTreeSitterError } from './src/server/errors';
+import { MCPTreeSitterError, QueryError, LanguageNotFoundError } from './src/server/errors';
 import { MCP_TOOLS_METADATA, MCP_PROMPTS_METADATA, handleMCPToolCall, handleMCPPrompt } from './src/server/mcp';
 import { ProjectIsolationError } from './src/server/isolation';
 import {
@@ -764,13 +764,18 @@ async function startServer() {
         lang = f.language;
       }
 
-      const ast = await parseSourceToASTAsync(source || '', lang || 'python');
-      const matches = executeQuery(ast, query, {
+      const matches = await executeQueryOnSource(source || '', lang || 'python', query, {
         captureFilter,
         maxResults: maxResults ? Number(maxResults) : 100,
       });
       res.json(matches);
     } catch (err: any) {
+      if (err instanceof QueryError) {
+        return res.status(400).json({ error: 'QueryError', message: err.message, details: err.details });
+      }
+      if (err instanceof LanguageNotFoundError) {
+        return res.status(404).json({ error: 'LanguageNotFoundError', message: err.message });
+      }
       if (err instanceof ProjectIsolationError) {
         return res.status(403).json({ error: 'Project Isolation Violation', message: err.message, code: err.code });
       }

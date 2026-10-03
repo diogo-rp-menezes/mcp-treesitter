@@ -67,6 +67,15 @@ export const LANGUAGE_TO_WASM_MAP: Record<string, string> = {
   objc: 'tree-sitter-objc.wasm',
 };
 
+// Incompatible or broken WASMs in tree-sitter-wasms@0.1.13 with web-tree-sitter@0.22.6
+export const KNOWN_BROKEN_LANGUAGES = new Set<string>([
+  'yaml',
+  'yml',
+  'dart',
+  'elm',
+  'ql',
+]);
+
 // Core languages preloaded on server startup for instantaneous response times
 const CORE_PRELOAD_LANGUAGES = [
   'python',
@@ -82,7 +91,6 @@ const CORE_PRELOAD_LANGUAGES = [
   'java',
   'html',
   'css',
-  'yaml',
   'toml',
 ];
 
@@ -157,7 +165,10 @@ export async function initTreeSitter(): Promise<void> {
  * Checks if a language is supported by tree-sitter-wasms.
  */
 export function isTreeSitterLanguageSupported(language: string): boolean {
-  const normalized = language.toLowerCase();
+  const normalized = language.toLowerCase().trim();
+  if (KNOWN_BROKEN_LANGUAGES.has(normalized)) {
+    return false;
+  }
   return Boolean(LANGUAGE_TO_WASM_MAP[normalized]);
 }
 
@@ -165,7 +176,11 @@ export function isTreeSitterLanguageSupported(language: string): boolean {
  * Retrieves a cached language or loads it dynamically on demand.
  */
 export async function getTreeSitterLanguage(language: string): Promise<Parser.Language | null> {
-  const normalized = language.toLowerCase();
+  const normalized = language.toLowerCase().trim();
+  if (KNOWN_BROKEN_LANGUAGES.has(normalized)) {
+    return null;
+  }
+
   if (loadedLanguages.has(normalized)) {
     return loadedLanguages.get(normalized)!;
   }
@@ -191,10 +206,18 @@ export async function getTreeSitterLanguage(language: string): Promise<Parser.La
 
   try {
     const loaded = await Parser.Language.load(wasmFilePath);
+    // Verify compatibility by checking if a Parser can set the language without error
+    const testParser = new Parser();
+    try {
+      testParser.setLanguage(loaded);
+    } finally {
+      testParser.delete();
+    }
     loadedLanguages.set(normalized, loaded);
     return loaded;
   } catch (err: any) {
-    console.warn(`[Tree-sitter WASM] Failed to load ${wasmFileName}: ${err?.message}`);
+    console.warn(`[Tree-sitter WASM] Failed to load or verify ${wasmFileName}: ${err?.message}`);
+    KNOWN_BROKEN_LANGUAGES.add(normalized);
     return null;
   }
 }
@@ -203,7 +226,10 @@ export async function getTreeSitterLanguage(language: string): Promise<Parser.La
  * Gets already loaded language synchronously, or null if not yet loaded.
  */
 export function getLoadedLanguageSync(language: string): Parser.Language | null {
-  const normalized = language.toLowerCase();
+  const normalized = language.toLowerCase().trim();
+  if (KNOWN_BROKEN_LANGUAGES.has(normalized)) {
+    return null;
+  }
   return loadedLanguages.get(normalized) || null;
 }
 
@@ -340,11 +366,20 @@ export async function parseRawTree(
   }
 
   const parser = new Parser();
-  parser.setLanguage(tsLanguage);
+  try {
+    parser.setLanguage(tsLanguage);
+  } catch (err: any) {
+    parser.delete();
+    console.warn(`[Tree-sitter] Failed to setLanguage for '${language}': ${err?.message}`);
+    return null;
+  }
 
   try {
     const tree = oldTree ? parser.parse(source, oldTree) : parser.parse(source);
     return { tree, tsLanguage };
+  } catch (err: any) {
+    console.warn(`[Tree-sitter] Failed to parse '${language}': ${err?.message}`);
+    return null;
   } finally {
     parser.delete();
   }
