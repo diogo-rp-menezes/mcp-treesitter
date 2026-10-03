@@ -173,6 +173,34 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+# Node.js / TypeScript / Vite
+node_modules/
+dist/
+build/
+*.local
+.env
+.env.local
+.env.*.local
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vite/
+coverage/
+*.tsbuildinfo
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
 # etc.
 results/
 diagnostic_results/

@@ -12,13 +12,32 @@ import { TEMPLATES, COMMON_NODE_DESCRIPTIONS } from './src/server/templates';
 import { MCP_TOOLS_METADATA, MCP_PROMPTS_METADATA, handleMCPToolCall, handleMCPPrompt } from './src/server/mcp';
 import { ProjectIsolationError } from './src/server/isolation';
 import { getProjectGitStatus, initProjectGitRepo } from './src/server/git';
+import { parseMcpAuthConfig, createMcpAuthMiddleware } from './src/server/auth';
+import { parseWorkspaceRootsConfig, validateScanDirectoryPath } from './src/server/workspaceRoots';
+import { parseCorsConfig, createCorsOptions } from './src/server/corsConfig';
 
 async function startServer() {
   const app = express();
   const port = Number(process.env.PORT || 3000);
   const host = '0.0.0.0';
 
-  app.use(cors());
+  // MCP endpoint authentication (audit finding SEC-02). Parsed once at
+  // startup; invalid or inconsistent settings abort the process (fail-fast,
+  // fail-closed). /api/health is intentionally not mounted behind this
+  // middleware and stays public.
+  const mcpAuthConfig = parseMcpAuthConfig(process.env);
+  const mcpAuth = createMcpAuthMiddleware(mcpAuthConfig);
+
+  // Allowed workspace roots for /api/scan-directory (audit finding SEC-03).
+  // Parsed once at startup; malformed configuration aborts the process
+  // (fail-fast, fail-closed).
+  const workspaceRootsConfig = parseWorkspaceRootsConfig(process.env);
+
+  // CORS origin allowlist (audit finding SEC-04). Parsed once at startup;
+  // malformed configuration aborts the process (fail-fast, fail-closed).
+  const corsConfig = parseCorsConfig(process.env);
+
+  app.use(cors(createCorsOptions(corsConfig)));
   app.use(express.json({ limit: '10mb' }));
 
   // Health check
@@ -46,18 +65,18 @@ async function startServer() {
   });
 
   // Git Status API for active project
-  app.get('/api/projects/:name/git-status', (req, res) => {
+  app.get('/api/projects/:name/git-status', async (req, res) => {
     const proj = projectStore.getProject(req.params.name);
     if (!proj) return res.status(404).json({ error: 'Project not found' });
-    const status = getProjectGitStatus(proj.path);
+    const status = await getProjectGitStatus(proj.path);
     res.json(status);
   });
 
   // Initialize Git in project directory
-  app.post('/api/projects/:name/git-init', (req, res) => {
+  app.post('/api/projects/:name/git-init', async (req, res) => {
     const proj = projectStore.getProject(req.params.name);
     if (!proj) return res.status(404).json({ error: 'Project not found' });
-    const status = initProjectGitRepo(proj.path);
+    const status = await initProjectGitRepo(proj.path);
     res.json(status);
   });
 
@@ -108,19 +127,16 @@ async function startServer() {
   app.post('/api/scan-directory', (req, res) => {
     try {
       const { path: dirPath, name: customName, maxFiles = 150 } = req.body;
-      if (!dirPath) {
-        return res.status(400).json({ error: 'Directory path is required' });
-      }
 
-      const normalizedPath = path.resolve(dirPath);
-      if (!fs.existsSync(normalizedPath)) {
-        return res.status(404).json({ error: `Directory does not exist: ${normalizedPath}` });
+      // Workspace root boundary validation (audit finding SEC-03). Runs
+      // before any filesystem access so the endpoint cannot be used as a
+      // filesystem oracle outside the allowed roots. Fail-closed: paths
+      // outside the roots get 403 with a generic, non-revealing message.
+      const scanValidation = validateScanDirectoryPath(dirPath, workspaceRootsConfig);
+      if (!scanValidation.ok) {
+        return res.status(scanValidation.status).json({ error: scanValidation.error });
       }
-
-      const stat = fs.statSync(normalizedPath);
-      if (!stat.isDirectory()) {
-        return res.status(400).json({ error: `Path is not a directory: ${normalizedPath}` });
-      }
+      const normalizedPath = scanValidation.resolvedPath;
 
       const baseName = path.basename(normalizedPath) || 'scanned-project';
       const projectName = (customName || baseName).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
@@ -500,7 +516,7 @@ async function startServer() {
   });
 
   // Full Model Context Protocol (MCP) JSON-RPC 2.0 Handler
-  app.post('/api/mcp', async (req, res) => {
+  app.post('/api/mcp', mcpAuth, async (req, res) => {
     const { jsonrpc, id, method, params } = req.body;
 
     if (jsonrpc !== '2.0') {
@@ -630,7 +646,7 @@ async function startServer() {
   });
 
   // Server-Sent Events (SSE) MCP Stream
-  app.get('/mcp/sse', (req, res) => {
+  app.get('/mcp/sse', mcpAuth, (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -667,6 +683,20 @@ async function startServer() {
     console.log(`[MCP Tree-sitter] Server running at http://${host}:${port}`);
     console.log(`[MCP Tree-sitter] MCP JSON-RPC available at http://${host}:${port}/api/mcp`);
     console.log(`[MCP Tree-sitter] MCP SSE Stream available at http://${host}:${port}/mcp/sse`);
+    console.log(
+      `[MCP Tree-sitter] MCP authentication ${mcpAuthConfig.enabled ? 'ENABLED' : 'DISABLED'} ` +
+        `(api-keys: ${mcpAuthConfig.apiKeys.length}, jwt: ${mcpAuthConfig.jwtSecret ? 'on' : 'off'})`
+    );
+    console.log(
+      `[MCP Tree-sitter] scan-directory allowed roots: ${workspaceRootsConfig.roots.join(', ')}`
+    );
+    console.log(
+      `[MCP Tree-sitter] CORS ${
+        corsConfig.wildcard
+          ? 'wildcard (*) - credentials disabled'
+          : `origins: ${corsConfig.origins.join(', ')}`
+      }`
+    );
   });
 }
 
