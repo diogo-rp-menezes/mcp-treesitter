@@ -42,6 +42,7 @@ interface CodeEditorProps {
   onCopyCode: () => void;
   onSaveCode?: () => void;
   onSelectInspector?: (tab: NavTab) => void;
+  onDiagnosticsChange?: (count: number) => void;
 }
 
 // Fallback synchronous AST error node extraction
@@ -193,12 +194,19 @@ export function CodeEditor({
   onCopyCode,
   onSaveCode,
   onSelectInspector,
+  onDiagnosticsChange,
 }: CodeEditorProps) {
   const [copied, setCopied] = useState(false);
   const [showMiniMap, setShowMiniMap] = useState(true);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [diagnostics, setDiagnostics] = useState<LintMarker[]>([]);
   const [isWorkerActive, setIsWorkerActive] = useState(false);
+
+  useEffect(() => {
+    if (onDiagnosticsChange) {
+      onDiagnosticsChange(diagnostics.length);
+    }
+  }, [diagnostics, onDiagnosticsChange]);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);

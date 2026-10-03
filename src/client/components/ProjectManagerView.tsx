@@ -35,6 +35,7 @@ import {
   CopyPlus,
   AlertTriangle,
   FolderPlus,
+  X,
 } from 'lucide-react';
 import { ProjectInfo, ProjectOverview } from '../types';
 import { ProjectVisualSummary } from './ProjectVisualSummary';
@@ -50,6 +51,7 @@ interface ProjectManagerViewProps {
   onSelectFile: (file: string) => void;
   onRefreshProjects: () => void;
   onNavigateToAST?: () => void;
+  onClose?: () => void;
 }
 
 export function ProjectManagerView({
@@ -61,6 +63,7 @@ export function ProjectManagerView({
   onSelectFile,
   onRefreshProjects,
   onNavigateToAST,
+  onClose,
 }: ProjectManagerViewProps) {
   // Navigation mode within Project Manager: 'dashboard' or 'files'
   const [managerTab, setManagerTab] = useState<'dashboard' | 'files'>('dashboard');
@@ -892,6 +895,16 @@ export function ProjectManagerView({
             <Plus className="w-3.5 h-3.5" />
             <span>Novo Projeto</span>
           </button>
+
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-red-400 rounded-lg border border-slate-800 transition"
+              title="Fechar Project Manager"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
 

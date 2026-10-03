@@ -805,6 +805,37 @@ async function startServer() {
     }
   });
 
+  // Consolidated real-time analysis endpoint to minimize network overhead and avoid throttling
+  app.post('/api/analyze', (req, res) => {
+    try {
+      const { code, language, project, path } = req.body;
+      let source = code;
+      let lang = language || 'python';
+
+      if (!source && project && path) {
+        const f = projectStore.getFile(project, path);
+        if (!f) return res.status(404).json({ error: 'File not found' });
+        source = f.content;
+        lang = f.language;
+      }
+
+      const ast = parseSourceToAST(source || '', lang);
+      const symbols = extractSymbolsFromAST(ast, lang);
+      const complexity = calculateComplexity(source || '', ast);
+
+      res.json({
+        ast,
+        symbols,
+        complexity,
+      });
+    } catch (err: any) {
+      if (err instanceof ProjectIsolationError) {
+        return res.status(403).json({ error: 'Project Isolation Violation', message: err.message, code: err.code });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Node at position
   app.post('/api/node-at-pos', (req, res) => {
     try {

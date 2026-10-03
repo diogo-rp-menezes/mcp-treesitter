@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { Sidebar, NavTab } from './components/Sidebar';
 import { VSCodeTitleBar } from './components/VSCodeTitleBar';
@@ -30,14 +30,28 @@ import {
 } from './types';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<NavTab>('ast');
+  const [activeTab, setActiveTab] = useState<NavTab>(() => {
+    const saved = localStorage.getItem('mcp_active_tab');
+    return (saved as NavTab) || 'ast';
+  });
 
   // Project state
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [activeProject, setActiveProject] = useState<string>('');
+  const [activeProject, setActiveProject] = useState<string>(() => {
+    return localStorage.getItem('mcp_active_project') || '';
+  });
   const [projectFiles, setProjectFiles] = useState<string[]>([]);
-  const [activeFile, setActiveFile] = useState<string>('');
-  const [openFiles, setOpenFiles] = useState<string[]>([]);
+  const [activeFile, setActiveFile] = useState<string>(() => {
+    return localStorage.getItem('mcp_active_file') || '';
+  });
+  const [openFiles, setOpenFiles] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('mcp_open_files');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Open a file tab explicitly
   const handleOpenFile = useCallback((filePath: string) => {
@@ -110,6 +124,7 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isMCPModalOpen, setIsMCPModalOpen] = useState<boolean>(false);
   const [treeSitterModalTool, setTreeSitterModalTool] = useState<NavTab | null>(null);
+  const [lintErrorCount, setLintErrorCount] = useState<number>(0);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -122,15 +137,39 @@ export default function App() {
     fetchMCPTools();
   }, []);
 
+  const isFirstRender = useRef(true);
+
+  // Synchronize state changes to localStorage
+  useEffect(() => {
+    localStorage.setItem('mcp_active_tab', activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    localStorage.setItem('mcp_active_project', activeProject);
+  }, [activeProject]);
+
+  useEffect(() => {
+    localStorage.setItem('mcp_open_files', JSON.stringify(openFiles));
+  }, [openFiles]);
+
+  useEffect(() => {
+    localStorage.setItem('mcp_active_file', activeFile);
+  }, [activeFile]);
+
   // Load project files when active project changes
   useEffect(() => {
     if (activeProject) {
-      setOpenFiles([]);
-      setActiveFile('');
-      setCode('');
-      setOriginalCode('');
-      setAst(null);
-      fetchFiles(activeProject);
+      if (isFirstRender.current) {
+        isFirstRender.current = false;
+        fetchFiles(activeProject);
+      } else {
+        setOpenFiles([]);
+        setActiveFile('');
+        setCode('');
+        setOriginalCode('');
+        setAst(null);
+        fetchFiles(activeProject);
+      }
     }
   }, [activeProject]);
 
@@ -256,38 +295,19 @@ export default function App() {
 
   async function analyzeCode(src: string, lang: string, signal?: AbortSignal) {
     try {
-      // 1. AST
-      const astRes = await fetch('/api/ast', {
+      const res = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: src, language: lang }),
         signal,
       });
       if (signal?.aborted) return;
-      const astData = await astRes.json();
-      setAst(astData);
-
-      // 2. Symbols
-      const symRes = await fetch('/api/symbols', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: src, language: lang }),
-        signal,
-      });
-      if (signal?.aborted) return;
-      const symData = await symRes.json();
-      setSymbols(symData);
-
-      // 3. Complexity
-      const compRes = await fetch('/api/complexity', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: src, language: lang }),
-        signal,
-      });
-      if (signal?.aborted) return;
-      const compData = await compRes.json();
-      setComplexity(compData);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      
+      const data = await res.json();
+      setAst(data.ast);
+      setSymbols(data.symbols);
+      setComplexity(data.complexity);
     } catch (err: any) {
       if (err.name === 'AbortError' || signal?.aborted) {
         // Request intentionally aborted by newer keystroke
@@ -490,6 +510,7 @@ export default function App() {
                 }}
                 onRefreshProjects={fetchProjects}
                 onNavigateToAST={() => setTreeSitterModalTool('ast')}
+                onClose={() => setActiveTab('ast')}
               />
             ) : activeTab === 'mcp' ? (
               <MCPConsoleView
@@ -523,6 +544,7 @@ export default function App() {
                   onCopyCode={() => showToast('Código copiado!')}
                   onSaveCode={handleSaveActiveFile}
                   onSelectInspector={(tool) => setTreeSitterModalTool(tool)}
+                  onDiagnosticsChange={setLintErrorCount}
                 />
               </div>
             )}
@@ -568,12 +590,10 @@ export default function App() {
 
       {/* 3. VS Code Bottom Status Bar */}
       <VSCodeStatusBar
-        activeProject={activeProject}
-        activeFile={activeFile}
         language={language}
-        isDirty={isCodeDirty}
-        projectsCount={projects.length}
         onOpenMCPModal={() => setIsMCPModalOpen(true)}
+        lintErrorCount={lintErrorCount}
+        lineCount={code ? code.split('\n').length : 0}
       />
 
       {/* Modal: Connect Claude Desktop / Cursor */}

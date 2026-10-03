@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Network, Save, Terminal, HardDrive, Search, Settings, ShieldCheck, Play, FolderPlus } from 'lucide-react';
+import { Network, Search } from 'lucide-react';
 import { ProjectInfo, PRESET_SNIPPETS } from '../types';
 
 interface VSCodeTitleBarProps {
@@ -77,34 +77,10 @@ export function VSCodeTitleBar({
 
       {/* Right: Actions, Project Switcher & Status Badges */}
       <div className="flex items-center gap-2 shrink-0">
-        {/* Save File Button */}
-        {activeFile && (
-          <button
-            onClick={onSaveFile}
-            disabled={!isDirty}
-            className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition ${
-              isDirty
-                ? 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-xs'
-                : 'bg-[#252526] text-slate-500 border border-[#333] cursor-not-allowed'
-            }`}
-            title={isDirty ? 'Salvar alterações no SQLite (Ctrl+S)' : 'Arquivo sem alterações pendentes'}
-          >
-            <Save className="w-3 h-3" />
-            <span className="hidden sm:inline">Salvar</span>
-            {isDirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />}
-          </button>
-        )}
-
-        {/* MCP Connect Button */}
-        <button
-          onClick={onOpenMCPModal}
-          className="px-2 py-1 bg-[#0e7490]/30 hover:bg-[#0e7490]/50 border border-cyan-500/40 text-cyan-300 rounded text-[11px] font-medium flex items-center gap-1.5 transition"
-          title="Verificar endpoint JSON-RPC / SSE do servidor MCP"
-        >
-          <Terminal className="w-3 h-3 text-cyan-400" />
-          <span className="hidden sm:inline">MCP Server</span>
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-        </button>
+        <span className="text-[10px] text-emerald-400 font-mono bg-emerald-950/40 border border-emerald-500/20 px-2 py-0.5 rounded flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          Connected
+        </span>
       </div>
     </div>
   );

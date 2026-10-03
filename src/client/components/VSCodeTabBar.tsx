@@ -1,5 +1,5 @@
 import React from 'react';
-import { FileCode, Save, X } from 'lucide-react';
+import { FileCode, X } from 'lucide-react';
 
 interface VSCodeTabBarProps {
   openFiles: string[];
@@ -80,17 +80,6 @@ export function VSCodeTabBar({
 
       {/* Right Tab Bar Actions */}
       <div className="flex items-center gap-2 px-2 border-l border-[#2b2b2b] bg-[#252526] h-full shrink-0">
-        {isDirty && onSaveFile && (
-          <button
-            onClick={onSaveFile}
-            className="px-2 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-[11px] font-medium flex items-center gap-1 transition shadow-xs"
-            title="Salvar alterações no SQLite (Ctrl+S)"
-          >
-            <Save className="w-3 h-3" />
-            <span>Salvar</span>
-          </button>
-        )}
-
         <span className="text-[10px] text-cyan-400 font-mono bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#333] uppercase">
           {language || 'TXT'}
         </span>

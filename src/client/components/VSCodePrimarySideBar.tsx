@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   FolderTree,
   FileCode,
@@ -37,6 +37,63 @@ interface VSCodePrimarySideBarProps {
   onOpenScanModal?: () => void;
 }
 
+interface FileTreeNode {
+  name: string;
+  path: string; // Full relative path
+  isDirectory: boolean;
+  children: FileTreeNode[];
+  extension?: string;
+}
+
+// Convert a flat list of file paths into a nested tree structure
+function buildFileTree(filePaths: string[]): FileTreeNode[] {
+  const rootNodes: FileTreeNode[] = [];
+
+  for (const filePath of filePaths) {
+    const parts = filePath.split('/');
+    let currentLevel = rootNodes;
+    let accumulatedPath = '';
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      accumulatedPath = accumulatedPath ? `${accumulatedPath}/${part}` : part;
+      const isFile = i === parts.length - 1;
+
+      let existingNode = currentLevel.find((n) => n.name === part);
+
+      if (!existingNode) {
+        existingNode = {
+          name: part,
+          path: accumulatedPath,
+          isDirectory: !isFile,
+          children: [],
+          extension: isFile ? part.split('.').pop()?.toLowerCase() : undefined,
+        };
+        currentLevel.push(existingNode);
+      }
+
+      currentLevel = existingNode.children;
+    }
+  }
+
+  // Sort nodes: directories first, then alphabetical
+  function sortNodes(nodes: FileTreeNode[]) {
+    nodes.sort((a, b) => {
+      if (a.isDirectory && !b.isDirectory) return -1;
+      if (!a.isDirectory && b.isDirectory) return 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const node of nodes) {
+      if (node.children.length > 0) {
+        sortNodes(node.children);
+      }
+    }
+  }
+
+  sortNodes(rootNodes);
+  return rootNodes;
+}
+
 export function VSCodePrimarySideBar({
   activeTab,
   projects,
@@ -58,12 +115,31 @@ export function VSCodePrimarySideBar({
 }: VSCodePrimarySideBarProps) {
   const [fileFilter, setFileFilter] = useState('');
   const [isExplorerExpanded, setIsExplorerExpanded] = useState(true);
+  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
 
-  const filteredFiles = projectFiles.filter((f) =>
-    f.toLowerCase().includes(fileFilter.toLowerCase())
-  );
+  const filteredFiles = useMemo(() => {
+    return projectFiles.filter((f) =>
+      f.toLowerCase().includes(fileFilter.toLowerCase())
+    );
+  }, [projectFiles, fileFilter]);
+
+  const fileTree = useMemo(() => {
+    return buildFileTree(filteredFiles);
+  }, [filteredFiles]);
 
   const currentProject = projects.find((p) => p.name === activeProject);
+
+  const toggleFolder = (folderPath: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpandedFolders((prev) => ({
+      ...prev,
+      [folderPath]: prev[folderPath] !== undefined ? !prev[folderPath] : false, // Default: expanded (true)
+    }));
+  };
+
+  const isFolderExpanded = (folderPath: string) => {
+    return expandedFolders[folderPath] !== false; // Expanded by default
+  };
 
   function getFileIcon(filename: string) {
     if (filename.endsWith('.py')) return <span className="text-amber-400 font-bold text-[10px]">PY</span>;
@@ -74,6 +150,66 @@ export function VSCodePrimarySideBar({
     if (filename.endsWith('.sql')) return <span className="text-purple-400 font-bold text-[10px]">SQL</span>;
     return <FileCode className="w-3.5 h-3.5 text-slate-400" />;
   }
+
+  // Recursive Tree Node Renderer
+  const renderTreeNode = (node: FileTreeNode, depth = 0) => {
+    if (node.isDirectory) {
+      const expanded = isFolderExpanded(node.path);
+
+      return (
+        <div key={node.path} className="select-none">
+          <div
+            onClick={(e) => toggleFolder(node.path, e)}
+            style={{ paddingLeft: `${depth * 8 + 4}px` }}
+            className="flex items-center gap-1.5 py-1 px-1 rounded-sm hover:bg-[#2a2d2e] text-slate-300 hover:text-slate-100 text-[11px] cursor-pointer group transition"
+          >
+            {expanded ? (
+              <ChevronDown className="w-3 h-3 text-slate-500 shrink-0" />
+            ) : (
+              <ChevronRight className="w-3 h-3 text-slate-500 shrink-0" />
+            )}
+            {expanded ? (
+              <FolderOpen className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            ) : (
+              <Folder className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            )}
+            <span className="font-mono font-medium truncate">{node.name}</span>
+          </div>
+
+          {expanded && (
+            <div className="relative border-l border-[#333] ml-2 mt-0.5">
+              {node.children.map((child) => renderTreeNode(child, depth + 1))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const isActive = activeFile === node.path;
+
+    return (
+      <button
+        key={node.path}
+        onClick={() => {
+          onSelectFile(node.path);
+        }}
+        style={{ paddingLeft: `${depth * 8 + 4}px` }}
+        className={`w-full text-left py-1 px-1 rounded-sm text-[11px] flex items-center justify-between transition group font-mono ${
+          isActive
+            ? 'bg-[#04395e] text-white font-medium'
+            : 'text-slate-300 hover:bg-[#2a2d2e] hover:text-slate-100'
+        }`}
+      >
+        <div className="flex items-center gap-1.5 truncate">
+          {getFileIcon(node.name)}
+          <span className="truncate">{node.name}</span>
+        </div>
+        {isActive && (
+          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shrink-0 mr-1" />
+        )}
+      </button>
+    );
+  };
 
   return (
     <aside className="w-60 bg-[#252526] border-r border-[#2b2b2b] flex flex-col justify-between shrink-0 select-none text-xs font-sans">
@@ -192,36 +328,13 @@ export function VSCodePrimarySideBar({
               </button>
 
               {isExplorerExpanded && (
-                <div className="pl-2 space-y-0.5 mt-1 border-l border-[#333] ml-1.5">
-                  {filteredFiles.length === 0 ? (
+                <div className="pl-1 space-y-0.5 mt-1 border-l border-[#333] ml-1.5">
+                  {fileTree.length === 0 ? (
                     <div className="py-2 text-[11px] text-slate-500 italic px-2">
                       {activeProject ? 'Nenhum arquivo encontrado' : 'Crie ou importe um projeto'}
                     </div>
                   ) : (
-                    filteredFiles.map((file) => {
-                      const isActive = activeFile === file;
-                      return (
-                        <button
-                          key={file}
-                          onClick={() => {
-                            onSelectFile(file);
-                          }}
-                          className={`w-full text-left px-2 py-1 rounded text-xs flex items-center justify-between transition group font-mono ${
-                            isActive
-                              ? 'bg-[#04395e] text-white font-medium'
-                              : 'text-slate-300 hover:bg-[#2a2d2e] hover:text-slate-100'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2 truncate">
-                            {getFileIcon(file)}
-                            <span className="truncate">{file}</span>
-                          </div>
-                          {isActive && (
-                            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shrink-0" />
-                          )}
-                        </button>
-                      );
-                    })
+                    fileTree.map((node) => renderTreeNode(node, 0))
                   )}
                 </div>
               )}

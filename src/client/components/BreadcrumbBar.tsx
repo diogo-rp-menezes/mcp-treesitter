@@ -313,6 +313,14 @@ export function BreadcrumbBar({
             </React.Fragment>
           );
         })}
+        {!activeFile && (
+          <>
+            <ChevronRight className="w-3 h-3 text-slate-600 shrink-0" />
+            <span className="text-slate-500 italic text-[11px] font-sans">
+              Selecione um arquivo no Explorer para abrir
+            </span>
+          </>
+        )}
       </div>
 
       {/* Right: Path Info & Copy Action */}

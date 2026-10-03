@@ -30,4 +30,13 @@ def process(x):
     expect(metrics.cyclomaticComplexity).toBe(1);
     expect(metrics.functionCount).toBe(1);
   });
+
+  it('excludes string literals and protocol URLs from comment counts', () => {
+    const code = `url = "https://google.com"\nmsg = "This is a # hashtag inside a string"\n`;
+    const ast = parseSourceToAST(code, 'python');
+    const metrics = calculateComplexity(code, ast);
+
+    expect(metrics.commentLines).toBe(0);
+    expect(metrics.codeLines).toBe(2);
+  });
 });
