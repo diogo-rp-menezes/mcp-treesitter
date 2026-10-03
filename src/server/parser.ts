@@ -192,6 +192,16 @@ function parsePython(
         const bIndent = bl.search(/\S/);
         if (bt.startsWith('#')) {
           blockChildren.push(makeNode('comment', false, { row: r, column: bIndent }, { row: r, column: bl.length }));
+        } else if (/^if[\s(]/.test(bt)) {
+          blockChildren.push(makeNode('if_statement', true, { row: r, column: bIndent }, { row: r, column: bl.length }));
+        } else if (/^elif[\s(]/.test(bt)) {
+          blockChildren.push(makeNode('elif_clause', true, { row: r, column: bIndent }, { row: r, column: bl.length }));
+        } else if (bt.startsWith('else:')) {
+          blockChildren.push(makeNode('else_clause', true, { row: r, column: bIndent }, { row: r, column: bl.length }));
+        } else if (/^for[\s(]/.test(bt)) {
+          blockChildren.push(makeNode('for_statement', true, { row: r, column: bIndent }, { row: r, column: bl.length }));
+        } else if (/^while[\s(]/.test(bt)) {
+          blockChildren.push(makeNode('while_statement', true, { row: r, column: bIndent }, { row: r, column: bl.length }));
         } else if (bt.startsWith('return')) {
           blockChildren.push(makeNode('return_statement', true, { row: r, column: bIndent }, { row: r, column: bl.length }));
         } else if (bt.includes('(') && bt.includes(')')) {

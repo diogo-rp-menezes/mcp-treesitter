@@ -12,23 +12,80 @@ import { TEMPLATES, COMMON_NODE_DESCRIPTIONS } from './src/server/templates';
 import { MCP_TOOLS_METADATA, MCP_PROMPTS_METADATA, handleMCPToolCall, handleMCPPrompt } from './src/server/mcp';
 import { ProjectIsolationError } from './src/server/isolation';
 import { getProjectGitStatus, initProjectGitRepo } from './src/server/git';
+import { importGitHubRepository, parseGitHubRepo } from './src/server/github';
 
 async function startServer() {
   const app = express();
   const port = Number(process.env.PORT || 3000);
   const host = '0.0.0.0';
 
-  app.use(cors());
+  // Secure CORS configuration
+  const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
+    : ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173'];
+
+  app.use(
+    cors({
+      origin: (origin, callback) => {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+          return callback(null, true);
+        }
+        if (process.env.NODE_ENV !== 'production') {
+          return callback(null, true);
+        }
+        return callback(new Error(`Bloqueado por política CORS: Origem '${origin}' não autorizada.`));
+      },
+      credentials: true,
+    })
+  );
+
   app.use(express.json({ limit: '10mb' }));
 
-  // Health check
+  // API Key Authentication Middleware (Permissive when API_KEY is not defined in dev)
+  const expectedApiKey = process.env.API_KEY;
+  app.use((req, res, next) => {
+    // Exclude health check, SSE stream, and non-api routes
+    if (
+      req.path === '/api/health' ||
+      req.path === '/mcp/sse' ||
+      !req.path.startsWith('/api/') ||
+      !expectedApiKey
+    ) {
+      return next();
+    }
+
+    const authHeader = req.headers['authorization'];
+    const apiKeyHeader = req.headers['x-api-key'];
+    const token =
+      apiKeyHeader ||
+      (authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null);
+
+    if (!token || token !== expectedApiKey) {
+      return res.status(401).json({
+        error: 'Não autorizado',
+        message: 'Chave de API inválida ou ausente. Forneça x-api-key ou Bearer token.',
+      });
+    }
+
+    next();
+  });
+
+  // Health check with memory and runtime status
   app.get('/api/health', (req, res) => {
+    const memory = process.memoryUsage();
     res.json({
       status: 'ok',
       service: 'mcp-server-tree-sitter',
       version: '0.7.0',
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
+      memory: {
+        rssMB: Math.round(memory.rss / (1024 * 1024)),
+        heapUsedMB: Math.round(memory.heapUsed / (1024 * 1024)),
+        heapTotalMB: Math.round(memory.heapTotal / (1024 * 1024)),
+      },
+      environment: process.env.NODE_ENV || 'development',
     });
   });
 
@@ -113,6 +170,19 @@ async function startServer() {
       }
 
       const normalizedPath = path.resolve(dirPath);
+
+      // Security boundary check: prohibit path traversal outside allowed workspace
+      const appRoot = path.resolve(process.cwd());
+      const workspaceRoot = fs.existsSync('/workspace') ? path.resolve('/workspace') : appRoot;
+      const isWithinApp = normalizedPath === appRoot || normalizedPath.startsWith(`${appRoot}${path.sep}`);
+      const isWithinWorkspace = normalizedPath === workspaceRoot || normalizedPath.startsWith(`${workspaceRoot}${path.sep}`);
+
+      if (!isWithinApp && !isWithinWorkspace) {
+        return res.status(403).json({
+          error: 'Acesso negado: O caminho solicitado está fora do workspace permitido (path traversal detectado).',
+        });
+      }
+
       if (!fs.existsSync(normalizedPath)) {
         return res.status(404).json({ error: `Directory does not exist: ${normalizedPath}` });
       }
@@ -138,6 +208,8 @@ async function startServer() {
         '.cache',
         '.idea',
         '.vscode',
+        '.ssh',
+        '.aws',
         'coverage',
       ]);
 
@@ -167,6 +239,15 @@ async function startServer() {
               walk(fullPath);
             }
           } else if (entry.isFile()) {
+            // Protect against reading secret/credential files
+            if (
+              entry.name.startsWith('.env') ||
+              entry.name.includes('credential') ||
+              entry.name.includes('id_rsa') ||
+              entry.name.endsWith('.pem')
+            ) {
+              continue;
+            }
             const ext = path.extname(entry.name).toLowerCase();
             if (ALLOWED_EXTS.has(ext)) {
               const rel = path.relative(normalizedPath, fullPath).replace(/\\/g, '/');
@@ -223,6 +304,70 @@ async function startServer() {
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Import Project directly from GitHub
+  app.post('/api/projects/import-github', async (req, res) => {
+    try {
+      const { repoUrl, branch, subpath, projectName: customName, token, maxFiles = 60 } = req.body;
+      if (!repoUrl) {
+        return res.status(400).json({ error: 'A URL ou identificador do repositório (owner/repo) é obrigatório.' });
+      }
+
+      const parsed = parseGitHubRepo(repoUrl);
+      if (!parsed) {
+        return res.status(400).json({ error: 'Formato de repositório inválido. Utilize "owner/repo" ou "https://github.com/owner/repo".' });
+      }
+
+      const result = await importGitHubRepository({
+        repoUrl,
+        branch,
+        subpath,
+        token,
+        maxFiles: Number(maxFiles) || 60,
+      });
+
+      const baseName = result.repo.repo || 'github-project';
+      const cleanProjName = (customName || baseName)
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, '-')
+        .replace(/^-+|-+$/g, '') || 'github-project';
+
+      const projPath = `/workspace/${cleanProjName}`;
+      const description = result.repo.description
+        ? `${result.repo.description} (GitHub: ${result.repo.owner}/${result.repo.repo}@${result.branch})`
+        : `Repositório importado do GitHub: ${result.repo.owner}/${result.repo.repo}@${result.branch}`;
+
+      // Create project in projectStore
+      const proj = projectStore.createProject(cleanProjName, projPath, description);
+
+      let savedCount = 0;
+      const detectedLangs = new Set<string>();
+
+      for (const file of result.files) {
+        try {
+          const saved = projectStore.saveFile(proj.name, file.path, file.content);
+          detectedLangs.add(saved.language);
+          savedCount++;
+        } catch {
+          // ignore path isolation conflicts
+        }
+      }
+
+      res.json({
+        status: 'imported',
+        project: proj.name,
+        path: proj.path,
+        filesCount: savedCount,
+        totalDiscovered: result.totalDiscovered,
+        detectedLanguages: Array.from(detectedLangs),
+        repoUrl: `https://github.com/${result.repo.owner}/${result.repo.repo}`,
+        branch: result.branch,
+        stars: result.repo.stars,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Falha ao importar repositório do GitHub.' });
     }
   });
 
@@ -629,12 +774,16 @@ async function startServer() {
     }
   });
 
+  const activeSseClients = new Set<express.Response>();
+
   // Server-Sent Events (SSE) MCP Stream
   app.get('/mcp/sse', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
+
+    activeSseClients.add(res);
 
     const endpointMsg = JSON.stringify({ endpoint: '/api/mcp' });
     res.write(`event: endpoint\ndata: ${endpointMsg}\n\n`);
@@ -645,6 +794,7 @@ async function startServer() {
 
     req.on('close', () => {
       clearInterval(interval);
+      activeSseClients.delete(res);
     });
   });
 
@@ -663,11 +813,42 @@ async function startServer() {
     });
   }
 
-  app.listen(port, host, () => {
+  const server = app.listen(port, host, () => {
     console.log(`[MCP Tree-sitter] Server running at http://${host}:${port}`);
     console.log(`[MCP Tree-sitter] MCP JSON-RPC available at http://${host}:${port}/api/mcp`);
     console.log(`[MCP Tree-sitter] MCP SSE Stream available at http://${host}:${port}/mcp/sse`);
   });
+
+  // Graceful shutdown handling
+  let isShuttingDown = false;
+  const gracefulShutdown = (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`[MCP Tree-sitter] Recebido ${signal}. Encerrando conexões graciosamente...`);
+
+    // Notify and close SSE clients
+    for (const client of activeSseClients) {
+      try {
+        client.write('event: shutdown\ndata: {"status":"shutting_down"}\n\n');
+        client.end();
+      } catch {}
+    }
+    activeSseClients.clear();
+
+    server.close(() => {
+      console.log('[MCP Tree-sitter] Servidor HTTP encerrado com sucesso.');
+      process.exit(0);
+    });
+
+    // Fallback force shutdown after 10 seconds
+    setTimeout(() => {
+      console.error('[MCP Tree-sitter] Timeout excedido no encerramento gracioso. Forçando saída.');
+      process.exit(1);
+    }, 10000).unref();
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 startServer().catch((err) => {

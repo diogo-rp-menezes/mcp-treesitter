@@ -28,6 +28,8 @@ import {
   ListTree,
   LayoutGrid,
   ExternalLink,
+  Github,
+  GitBranch,
 } from 'lucide-react';
 import { ProjectInfo, ProjectOverview } from '../types';
 import { ProjectVisualSummary } from './ProjectVisualSummary';
@@ -83,6 +85,18 @@ export function ProjectManagerView({
   const [scanMaxFiles, setScanMaxFiles] = useState(150);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+
+  // GitHub Import Modal States
+  const [showGitHubModal, setShowGitHubModal] = useState(false);
+  const [gitHubRepoUrl, setGitHubRepoUrl] = useState('');
+  const [gitHubBranch, setGitHubBranch] = useState('');
+  const [gitHubSubpath, setGitHubSubpath] = useState('');
+  const [gitHubCustomName, setGitHubCustomName] = useState('');
+  const [gitHubToken, setGitHubToken] = useState('');
+  const [gitHubMaxFiles, setGitHubMaxFiles] = useState(60);
+  const [gitHubLoading, setGitHubLoading] = useState(false);
+  const [gitHubError, setGitHubError] = useState<string | null>(null);
+  const [gitHubSuccess, setGitHubSuccess] = useState<string | null>(null);
 
   // Tree view file navigator & preview states
   const [fileViewMode, setFileViewMode] = useState<'tree' | 'grid'>('tree');
@@ -376,6 +390,86 @@ export function ProjectManagerView({
     }
   };
 
+  // Presets for quick GitHub testing
+  const GITHUB_PRESETS = [
+    { label: 'FastAPI (Python)', repo: 'fastapi/fastapi', branch: 'master', subpath: 'fastapi' },
+    { label: 'Flask (Python)', repo: 'pallets/flask', branch: 'main', subpath: 'src/flask' },
+    { label: 'Express (Node/TS)', repo: 'expressjs/express', branch: 'master', subpath: 'lib' },
+    { label: 'Rustlings (Rust)', repo: 'rust-lang/rustlings', branch: 'main', subpath: 'exercises' },
+  ];
+
+  const handleGitHubRepoChange = (val: string) => {
+    setGitHubRepoUrl(val);
+    setGitHubError(null);
+    const cleaned = val.trim().replace(/\.git$/, '').replace(/\/$/, '');
+    const parts = cleaned.split('/');
+    if (parts.length > 0) {
+      const last = parts[parts.length - 1];
+      if (last && (!gitHubCustomName || gitHubCustomName.trim() === '')) {
+        setGitHubCustomName(last.toLowerCase().replace(/[^a-z0-9_-]/g, '-'));
+      }
+    }
+  };
+
+  const handleImportGitHub = async () => {
+    if (!gitHubRepoUrl.trim()) {
+      setGitHubError('Informe a URL ou nome do repositório (ex: owner/repo).');
+      return;
+    }
+
+    setGitHubLoading(true);
+    setGitHubError(null);
+    setGitHubSuccess(null);
+
+    try {
+      const res = await fetch('/api/projects/import-github', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repoUrl: gitHubRepoUrl.trim(),
+          branch: gitHubBranch.trim() || undefined,
+          subpath: gitHubSubpath.trim() || undefined,
+          projectName: gitHubCustomName.trim() || undefined,
+          token: gitHubToken.trim() || undefined,
+          maxFiles: gitHubMaxFiles,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Falha ao importar repositório do GitHub.');
+      }
+
+      setGitHubSuccess(`Importado com sucesso: ${data.filesCount} arquivos salvos!`);
+      setTimeout(() => {
+        setShowGitHubModal(false);
+        setGitHubRepoUrl('');
+        setGitHubBranch('');
+        setGitHubSubpath('');
+        setGitHubCustomName('');
+        setGitHubToken('');
+        setGitHubSuccess(null);
+      }, 900);
+
+      onRefreshProjects();
+      fetchOverviews();
+      onSelectProject(data.project);
+
+      // Select first file
+      const filesRes = await fetch(`/api/projects/${encodeURIComponent(data.project)}/files`);
+      if (filesRes.ok) {
+        const files: string[] = await filesRes.json();
+        if (files.length > 0) {
+          onSelectFile(files[0]);
+        }
+      }
+    } catch (err: any) {
+      setGitHubError(err.message);
+    } finally {
+      setGitHubLoading(false);
+    }
+  };
+
   const handleDeleteProject = async (projectName: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (projects.length <= 1) {
@@ -572,6 +666,20 @@ export function ProjectManagerView({
               <RefreshCw className={`w-3.5 h-3.5 ${loadingOverviews ? 'animate-spin' : ''}`} />
             </button>
           )}
+
+          {/* IMPORT GITHUB REPOSITORY BUTTON */}
+          <button
+            onClick={() => {
+              setShowGitHubModal(true);
+              setGitHubError(null);
+              setGitHubSuccess(null);
+            }}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-purple-300 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition border border-slate-700 shadow-xs"
+            title="Importar código diretamente de um repositório GitHub público ou privado"
+          >
+            <Github className="w-3.5 h-3.5 text-purple-400" />
+            <span>Importar do GitHub</span>
+          </button>
 
           {/* SCAN DIRECTORY BUTTON */}
           <button
@@ -1383,6 +1491,186 @@ export function ProjectManagerView({
                       )}
                     </button>
                   )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: Import from GitHub */}
+          {showGitHubModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs animate-in fade-in duration-150">
+              <div className="bg-slate-900 border border-slate-700 p-5 rounded-2xl space-y-4 max-w-lg w-full shadow-2xl">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                  <h4 className="font-semibold text-sm text-slate-100 flex items-center gap-2">
+                    <Github className="w-4 h-4 text-purple-400" />
+                    <span>Importar Projeto do GitHub</span>
+                  </h4>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                    GitHub API
+                  </span>
+                </div>
+
+                {gitHubError && (
+                  <div className="p-3 bg-red-950/80 border border-red-800 rounded-lg text-red-200 text-xs flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                    <div className="flex-1">{gitHubError}</div>
+                  </div>
+                )}
+
+                {gitHubSuccess && (
+                  <div className="p-3 bg-emerald-950/80 border border-emerald-800 rounded-lg text-emerald-200 text-xs flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <div className="flex-1">{gitHubSuccess}</div>
+                  </div>
+                )}
+
+                <div className="space-y-3 text-xs">
+                  {/* Presets */}
+                  <div>
+                    <span className="block text-slate-400 font-medium mb-1.5 text-[11px]">
+                      Exemplos rápidos de repositórios populares:
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {GITHUB_PRESETS.map((p) => (
+                        <button
+                          key={p.label}
+                          type="button"
+                          onClick={() => {
+                            setGitHubRepoUrl(p.repo);
+                            setGitHubBranch(p.branch);
+                            setGitHubSubpath(p.subpath);
+                            setGitHubCustomName(p.repo.split('/')[1]);
+                            setGitHubError(null);
+                          }}
+                          className="px-2 py-1 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white rounded-md text-[11px] font-mono border border-slate-700 transition"
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Repository input */}
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">
+                      Repositório do GitHub (URL ou owner/repo): <span className="text-red-400">*</span>
+                    </label>
+                    <div className="relative">
+                      <Github className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        placeholder="Ex: expressjs/express ou https://github.com/pallets/flask"
+                        value={gitHubRepoUrl}
+                        onChange={(e) => handleGitHubRepoChange(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-2.5 py-2 text-slate-200 text-xs focus:outline-none focus:border-purple-500 font-mono"
+                        autoFocus
+                      />
+                    </div>
+                  </div>
+
+                  {/* Branch & Subpath grid */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-slate-300 font-medium mb-1">
+                        Branch / Tag (opcional):
+                      </label>
+                      <div className="relative">
+                        <GitBranch className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          placeholder="Padrão (main / master)"
+                          value={gitHubBranch}
+                          onChange={(e) => setGitHubBranch(e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-2.5 py-2 text-slate-200 text-xs focus:outline-none focus:border-purple-500 font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-300 font-medium mb-1">
+                        Subpasta no repo (opcional):
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Ex: src ou packages/core"
+                        value={gitHubSubpath}
+                        onChange={(e) => setGitHubSubpath(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 text-xs focus:outline-none focus:border-purple-500 font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Custom Project Name & Max Files */}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="col-span-2">
+                      <label className="block text-slate-300 font-medium mb-1">
+                        Nome do Projeto Isolado:
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Auto-gerado do repositório"
+                        value={gitHubCustomName}
+                        onChange={(e) => setGitHubCustomName(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 text-xs focus:outline-none focus:border-purple-500 font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-300 font-medium mb-1">
+                        Máx. Arquivos:
+                      </label>
+                      <select
+                        value={gitHubMaxFiles}
+                        onChange={(e) => setGitHubMaxFiles(Number(e.target.value))}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 text-xs focus:outline-none focus:border-purple-500"
+                      >
+                        <option value={30}>30 arquivos</option>
+                        <option value={60}>60 arquivos</option>
+                        <option value={100}>100 arquivos</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Optional GitHub Token */}
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">
+                      GitHub Personal Access Token (opcional, para repos privados):
+                    </label>
+                    <input
+                      type="password"
+                      placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                      value={gitHubToken}
+                      onChange={(e) => setGitHubToken(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 text-xs focus:outline-none focus:border-purple-500 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                  <button
+                    onClick={() => setShowGitHubModal(false)}
+                    disabled={gitHubLoading}
+                    className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleImportGitHub}
+                    disabled={gitHubLoading || !gitHubRepoUrl.trim()}
+                    className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow-xs"
+                  >
+                    {gitHubLoading ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Buscando e Importando...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Github className="w-3.5 h-3.5" />
+                        <span>Importar do GitHub</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             </div>

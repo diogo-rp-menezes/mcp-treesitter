@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -24,7 +24,7 @@ export interface GitRepoStatus {
 }
 
 /**
- * Checks the Git status of a project path safely.
+ * Checks the Git status of a project path safely using execFileSync without shell interpolation.
  */
 export function getProjectGitStatus(projectPath: string): GitRepoStatus {
   const normalizedPath = path.resolve(projectPath);
@@ -35,6 +35,8 @@ export function getProjectGitStatus(projectPath: string): GitRepoStatus {
     // If the project path is virtual like /projects/tree-sitter-core, fallback to workspace root
     if (fs.existsSync('/workspace')) {
       targetPath = '/workspace';
+    } else if (fs.existsSync(process.cwd())) {
+      targetPath = process.cwd();
     } else {
       return {
         isGitRepo: false,
@@ -53,7 +55,7 @@ export function getProjectGitStatus(projectPath: string): GitRepoStatus {
 
   // Check if targetPath is inside a git working tree
   try {
-    const isInside = execSync('git rev-parse --is-inside-work-tree', {
+    const isInside = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
       cwd: targetPath,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'ignore'],
@@ -77,7 +79,7 @@ export function getProjectGitStatus(projectPath: string): GitRepoStatus {
     // Branch name
     let branch = 'main';
     try {
-      branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
         cwd: targetPath,
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'ignore'],
@@ -93,7 +95,7 @@ export function getProjectGitStatus(projectPath: string): GitRepoStatus {
     let uncommittedCount = 0;
 
     try {
-      const statusOutput = execSync('git status --porcelain', {
+      const statusOutput = execFileSync('git', ['status', '--porcelain'], {
         cwd: targetPath,
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'ignore'],
@@ -120,7 +122,7 @@ export function getProjectGitStatus(projectPath: string): GitRepoStatus {
     // Last commit details
     let lastCommit: GitCommitInfo | null = null;
     try {
-      const logOutput = execSync('git log -1 --pretty=format:"%h|%an|%ar|%s|%ci"', {
+      const logOutput = execFileSync('git', ['log', '-1', '--pretty=format:%h|%an|%ar|%s|%ci'], {
         cwd: targetPath,
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'ignore'],
@@ -143,7 +145,7 @@ export function getProjectGitStatus(projectPath: string): GitRepoStatus {
     // Remote URL
     let remoteUrl: string | null = null;
     try {
-      remoteUrl = execSync('git remote get-url origin', {
+      remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
         cwd: targetPath,
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'ignore'],
@@ -186,17 +188,31 @@ export function getProjectGitStatus(projectPath: string): GitRepoStatus {
 }
 
 /**
- * Initializes a new Git repository at projectPath.
+ * Initializes a new Git repository safely without shell interpolation.
  */
 export function initProjectGitRepo(projectPath: string, branchName = 'main'): GitRepoStatus {
   const normalizedPath = path.resolve(projectPath);
+  const appRoot = path.resolve(process.cwd());
+  const workspaceRoot = fs.existsSync('/workspace') ? path.resolve('/workspace') : appRoot;
+
+  // Enforce boundary: project path must be strictly inside appRoot or workspaceRoot
+  const isWithinApp = normalizedPath === appRoot || normalizedPath.startsWith(`${appRoot}${path.sep}`);
+  const isWithinWorkspace = normalizedPath === workspaceRoot || normalizedPath.startsWith(`${workspaceRoot}${path.sep}`);
+
+  if (!isWithinApp && !isWithinWorkspace) {
+    throw new Error(`Permissão negada: o caminho '${projectPath}' está fora do workspace permitido.`);
+  }
+
   if (!fs.existsSync(normalizedPath)) {
     fs.mkdirSync(normalizedPath, { recursive: true });
   }
 
-  execSync(`git init -b ${branchName}`, { cwd: normalizedPath, stdio: 'ignore' });
-  execSync('git config user.name "AI Studio"', { cwd: normalizedPath, stdio: 'ignore' });
-  execSync('git config user.email "dev@aistudio.local"', { cwd: normalizedPath, stdio: 'ignore' });
+  // Validate branch name against safe pattern
+  const safeBranch = /^[a-zA-Z0-9._-]+$/.test(branchName) ? branchName : 'main';
+
+  execFileSync('git', ['init', '-b', safeBranch], { cwd: normalizedPath, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'AI Studio'], { cwd: normalizedPath, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'dev@aistudio.local'], { cwd: normalizedPath, stdio: 'ignore' });
 
   return getProjectGitStatus(normalizedPath);
 }
