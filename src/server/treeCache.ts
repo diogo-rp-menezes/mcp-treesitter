@@ -1,16 +1,18 @@
 /**
  * AST/Tree-sitter Language-Agnostic Specification - Section 7
- * Tree Caching Strategy with TTL and LRU Eviction
+ * Tree Caching Strategy with Content Hash Indexing and Incremental Parse
  */
 
 import Parser from 'web-tree-sitter';
-import fs from 'fs';
-import path from 'path';
+import crypto from 'crypto';
 import { serverConfig } from './config';
+import { parseRawTree, getTreeSitterLanguage } from './treeSitter';
 
 export interface CachedTree {
   tree: Parser.Tree;
-  source: Uint8Array;
+  tsLanguage: Parser.Language;
+  contentHash: string;
+  language: string;
   timestamp: number;
   byteSize: number;
 }
@@ -20,7 +22,6 @@ export class TreeCache {
   private maxSizeMB: number;
   private ttlSeconds: number;
   private cache = new Map<string, CachedTree>();
-  private modifiedSet = new Set<string>();
   private currentSizeBytes: number = 0;
 
   constructor() {
@@ -50,120 +51,131 @@ export class TreeCache {
     return this.enabled;
   }
 
-  private generateKey(filePath: string, language: string): string {
-    const absPath = path.resolve(filePath);
-    let mtime = 0;
-    try {
-      if (fs.existsSync(absPath)) {
-        mtime = fs.statSync(absPath).mtimeMs;
-      }
-    } catch {
-      // Use 0 if cannot stat
-    }
-    return `${language}:${absPath}:${mtime}`;
+  /**
+   * Generates a cryptographic SHA-256 hash key for source code and grammar.
+   */
+  public generateHashKey(source: string, language: string): string {
+    const hash = crypto.createHash('sha256').update(source).digest('hex').slice(0, 32);
+    return `${language.toLowerCase()}:${hash}`;
   }
 
-  public get(filePath: string, language: string): CachedTree | null {
-    if (!this.enabled) return null;
+  /**
+   * Retrieves a cached Tree by source content and language, or parses and caches it.
+   */
+  public async getOrParseTree(
+    source: string,
+    language: string,
+    oldTree?: Parser.Tree | null
+  ): Promise<{ tree: Parser.Tree; tsLanguage: Parser.Language } | null> {
+    const key = this.generateHashKey(source, language);
 
-    const key = this.generateKey(filePath, language);
-    const entry = this.cache.get(key);
-
-    if (!entry) return null;
-
-    // Check TTL expiration
-    const now = Date.now();
-    if (now - entry.timestamp > this.ttlSeconds * 1000) {
-      this.cache.delete(key);
-      this.currentSizeBytes -= entry.byteSize;
-      if (entry.tree && typeof entry.tree.delete === 'function') {
-        try {
-          entry.tree.delete();
-        } catch {}
+    if (this.enabled) {
+      const existing = this.cache.get(key);
+      if (existing) {
+        // Check TTL
+        const now = Date.now();
+        if (now - existing.timestamp <= this.ttlSeconds * 1000) {
+          // Refresh LRU
+          this.cache.delete(key);
+          this.cache.set(key, existing);
+          return { tree: existing.tree, tsLanguage: existing.tsLanguage };
+        } else {
+          this.deleteEntry(key, existing);
+        }
       }
+    }
+
+    // Parse fresh or incremental
+    const parsed = await parseRawTree(source, language, oldTree);
+    if (!parsed) {
       return null;
     }
 
-    // Refresh LRU position (delete & re-insert)
+    if (this.enabled) {
+      const byteSize = Buffer.byteLength(source, 'utf8') || 1024;
+      this.evictIfNeeded(byteSize);
+
+      const entry: CachedTree = {
+        tree: parsed.tree,
+        tsLanguage: parsed.tsLanguage,
+        contentHash: key,
+        language: language.toLowerCase(),
+        timestamp: Date.now(),
+        byteSize,
+      };
+
+      this.cache.set(key, entry);
+      this.currentSizeBytes += byteSize;
+    }
+
+    return parsed;
+  }
+
+  public get(filePathOrSource: string, language: string): CachedTree | null {
+    if (!this.enabled) return null;
+    const key = this.generateHashKey(filePathOrSource, language);
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+
+    const now = Date.now();
+    if (now - entry.timestamp > this.ttlSeconds * 1000) {
+      this.deleteEntry(key, entry);
+      return null;
+    }
+
     this.cache.delete(key);
     this.cache.set(key, entry);
-
     return entry;
   }
 
-  public put(filePath: string, language: string, tree: Parser.Tree, source: Uint8Array): void {
+  public put(filePathOrSource: string, language: string, tree: Parser.Tree, source: Uint8Array | string): void {
     if (!this.enabled) return;
-
-    const key = this.generateKey(filePath, language);
-    const byteSize = source.byteLength || 1024;
+    const key = this.generateHashKey(typeof source === 'string' ? source : filePathOrSource, language);
+    const byteSize = typeof source === 'string' ? Buffer.byteLength(source) : source.byteLength || 1024;
 
     this.evictIfNeeded(byteSize);
 
-    // If key already existed, remove previous size
-    const existing = this.cache.get(key);
-    if (existing) {
-      this.currentSizeBytes -= existing.byteSize;
-      if (existing.tree && typeof existing.tree.delete === 'function') {
-        try {
-          existing.tree.delete();
-        } catch {}
-      }
-    }
-
-    const entry: CachedTree = {
-      tree,
-      source,
-      timestamp: Date.now(),
-      byteSize,
-    };
-
-    this.cache.set(key, entry);
-    this.currentSizeBytes += byteSize;
-    this.modifiedSet.delete(key);
+    getTreeSitterLanguage(language).then((tsLanguage) => {
+      if (!tsLanguage) return;
+      const entry: CachedTree = {
+        tree,
+        tsLanguage,
+        contentHash: key,
+        language: language.toLowerCase(),
+        timestamp: Date.now(),
+        byteSize,
+      };
+      this.cache.set(key, entry);
+      this.currentSizeBytes += byteSize;
+    });
   }
 
-  public updateTree(filePath: string, language: string, tree: Parser.Tree, source: Uint8Array): void {
-    this.put(filePath, language, tree, source);
-  }
-
-  public invalidate(filePath?: string): void {
-    if (!filePath) {
-      // Clear all
-      for (const entry of this.cache.values()) {
-        if (entry.tree && typeof entry.tree.delete === 'function') {
-          try {
-            entry.tree.delete();
-          } catch {}
-        }
+  public invalidate(languageOrKey?: string): void {
+    if (!languageOrKey) {
+      for (const [key, entry] of this.cache.entries()) {
+        this.deleteEntry(key, entry);
       }
       this.cache.clear();
       this.currentSizeBytes = 0;
-      this.modifiedSet.clear();
       return;
     }
 
-    const absPath = path.resolve(filePath);
+    const filter = languageOrKey.toLowerCase();
     for (const [key, entry] of this.cache.entries()) {
-      if (key.includes(absPath)) {
-        this.cache.delete(key);
-        this.currentSizeBytes -= entry.byteSize;
-        if (entry.tree && typeof entry.tree.delete === 'function') {
-          try {
-            entry.tree.delete();
-          } catch {}
-        }
+      if (key.startsWith(filter) || entry.language === filter) {
+        this.deleteEntry(key, entry);
       }
     }
   }
 
-  public markModified(filePath: string, language: string): void {
-    const key = this.generateKey(filePath, language);
-    this.modifiedSet.add(key);
-  }
-
-  public isModified(filePath: string, language: string): boolean {
-    const key = this.generateKey(filePath, language);
-    return this.modifiedSet.has(key);
+  private deleteEntry(key: string, entry: CachedTree) {
+    this.cache.delete(key);
+    this.currentSizeBytes -= entry.byteSize;
+    if (entry.tree && typeof entry.tree.delete === 'function') {
+      try {
+        entry.tree.delete();
+      } catch {}
+    }
   }
 
   private evictIfNeeded(incomingBytes: number): void {
@@ -171,19 +183,12 @@ export class TreeCache {
     const threshold = maxBytes * 0.9;
 
     if (this.currentSizeBytes + incomingBytes > maxBytes || this.currentSizeBytes > threshold) {
-      // Evict oldest entries until below 70%
       const targetSize = maxBytes * 0.7;
       for (const [key, entry] of this.cache.entries()) {
         if (this.currentSizeBytes + incomingBytes <= targetSize && this.cache.size <= 1) {
           break;
         }
-        this.cache.delete(key);
-        this.currentSizeBytes -= entry.byteSize;
-        if (entry.tree && typeof entry.tree.delete === 'function') {
-          try {
-            entry.tree.delete();
-          } catch {}
-        }
+        this.deleteEntry(key, entry);
       }
     }
   }

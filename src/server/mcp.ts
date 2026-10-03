@@ -1,6 +1,6 @@
 /**
  * Model Context Protocol (MCP) Server Tools & Prompts
- * Implements MCP Tree-sitter Server specifications
+ * Implements MCP Tree-sitter Server specifications & high-efficiency LLM tools
  */
 
 import { projectStore } from './store';
@@ -25,6 +25,11 @@ import {
   findSimilarCode,
   getFileAST,
   findNodeAtPosition,
+  getOutline,
+  getSymbolSource,
+  findReferences,
+  safeReplaceNode,
+  analyzeFunctionComplexity,
 } from './operations';
 import { adaptQuery, buildCompoundQuery, getTemplate, describeNodeTypes } from './queryBuilder';
 import { serverConfig } from './config';
@@ -32,7 +37,7 @@ import { serverConfig } from './config';
 export const MCP_TOOLS_METADATA = [
   {
     name: 'get_ast',
-    description: 'Get abstract syntax tree for a file or code snippet.',
+    description: 'Get abstract syntax tree for a file or code snippet with syntax diagnostics.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -46,8 +51,73 @@ export const MCP_TOOLS_METADATA = [
     },
   },
   {
+    name: 'get_outline',
+    description: 'Get a compact outline map (signatures, functions, classes) for a file to minimize LLM token budget.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name' },
+        file_path: { type: 'string', description: 'Path to source file' },
+      },
+      required: ['project', 'file_path'],
+    },
+  },
+  {
+    name: 'get_symbol_source',
+    description: 'Extract exact source code snippet for a symbol using byte ranges without loading entire files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name' },
+        file_path: { type: 'string', description: 'File path' },
+        symbol_name: { type: 'string', description: 'Name of the function or class' },
+      },
+      required: ['project', 'file_path', 'symbol_name'],
+    },
+  },
+  {
+    name: 'find_references',
+    description: 'Find identifier usages and references across project files using Tree-sitter queries.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name' },
+        symbol_name: { type: 'string', description: 'Symbol/identifier name to search for' },
+        language: { type: 'string', description: 'Optional language filter' },
+      },
+      required: ['project', 'symbol_name'],
+    },
+  },
+  {
+    name: 'safe_replace_node',
+    description: 'Safely replace a code range and reject the edit if it introduces new syntax errors (ERROR nodes).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name' },
+        file_path: { type: 'string', description: 'File path' },
+        start_byte: { type: 'number', description: 'Start byte index' },
+        end_byte: { type: 'number', description: 'End byte index' },
+        replacement_text: { type: 'string', description: 'Replacement code' },
+      },
+      required: ['project', 'file_path', 'start_byte', 'end_byte', 'replacement_text'],
+    },
+  },
+  {
+    name: 'analyze_function_complexity',
+    description: 'Calculate McCabe cyclomatic complexity granularly per function/method.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name' },
+        file_path: { type: 'string', description: 'File path' },
+      },
+      required: ['project', 'file_path'],
+    },
+  },
+  {
     name: 'run_query',
-    description: 'Run a Tree-sitter S-expression query on project files or raw code.',
+    description: 'Run a Tree-sitter S-expression query on project files or raw code using native Language.query().',
     inputSchema: {
       type: 'object',
       properties: {
@@ -191,7 +261,7 @@ export const MCP_TOOLS_METADATA = [
   },
   {
     name: 'list_languages',
-    description: 'List available languages supported by the Tree-sitter server.',
+    description: 'List available languages with verified WebAssembly binaries in the Tree-sitter server.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -304,39 +374,23 @@ export const MCP_TOOLS_METADATA = [
   },
 ];
 
-// Global runtime MCP configuration and AST cache
+// Global runtime MCP configuration
 export const mcpConfig = {
   cacheEnabled: true,
   maxFileSizeMb: 10,
   logLevel: 'INFO',
 };
 
-const astCache = new Map<string, { ast: any; timestamp: number }>();
-
-export function getCachedAST(cacheKey: string, computeFn: () => any) {
-  if (!mcpConfig.cacheEnabled) {
-    return computeFn();
-  }
-  const cached = astCache.get(cacheKey);
-  if (cached) {
-    return cached.ast;
-  }
-  const result = computeFn();
-  astCache.set(cacheKey, { ast: result, timestamp: Date.now() });
-  return result;
-}
-
 export function clearASTCache(): number {
-  const count = astCache.size;
-  astCache.clear();
+  const stats = treeCache.getStats();
   treeCache.invalidate();
-  return count;
+  return stats.entriesCount;
 }
 
 export const MCP_PROMPTS_METADATA = [
   {
     name: 'code_review',
-    description: 'Prompt template for automated code review using extracted AST symbols.',
+    description: 'Prompt template for automated code review using extracted AST symbols and diagnostics.',
     arguments: [
       { name: 'project', description: 'Project name', required: true },
       { name: 'file_path', description: 'File to review', required: true },
@@ -442,6 +496,45 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
 
       if (!code) throw new Error('Either code or project + path must be provided');
       return await parseSourceToASTAsync(code, lang);
+    }
+
+    case 'get_outline': {
+      const proj = projectStore.getProject(args.project);
+      if (!proj) throw new Error(`Project '${args.project}' not found`);
+      return await getOutline(proj, args.file_path || args.path, languageRegistry);
+    }
+
+    case 'get_symbol_source': {
+      const proj = projectStore.getProject(args.project);
+      if (!proj) throw new Error(`Project '${args.project}' not found`);
+      const result = await getSymbolSource(proj, args.file_path || args.path, args.symbol_name, languageRegistry);
+      if (!result) throw new Error(`Symbol '${args.symbol_name}' not found in '${args.file_path || args.path}'`);
+      return result;
+    }
+
+    case 'find_references': {
+      const proj = projectStore.getProject(args.project);
+      if (!proj) throw new Error(`Project '${args.project}' not found`);
+      return await findReferences(proj, args.symbol_name, args.language, languageRegistry);
+    }
+
+    case 'safe_replace_node': {
+      const proj = projectStore.getProject(args.project);
+      if (!proj) throw new Error(`Project '${args.project}' not found`);
+      return await safeReplaceNode(
+        proj,
+        args.file_path || args.path,
+        Number(args.start_byte),
+        Number(args.end_byte),
+        args.replacement_text,
+        languageRegistry
+      );
+    }
+
+    case 'analyze_function_complexity': {
+      const proj = projectStore.getProject(args.project);
+      if (!proj) throw new Error(`Project '${args.project}' not found`);
+      return await analyzeFunctionComplexity(proj, args.file_path || args.path, languageRegistry);
     }
 
     case 'get_node_at_position': {

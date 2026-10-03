@@ -1,4 +1,11 @@
+/**
+ * AST/Tree-sitter Query Engine
+ * Supports official web-tree-sitter native queries as well as predicate/negated field AST evaluation
+ */
+
+import Parser from 'web-tree-sitter';
 import { ASTNode, QueryCapture, QueryMatch } from './types';
+import { treeCache } from './treeCache';
 
 export type PredicateType = 'eq' | 'not-eq' | 'match' | 'not-match' | 'any-of';
 
@@ -22,10 +29,18 @@ export interface QueryPattern {
   isImmediateChild?: boolean;
 }
 
+export interface QueryOptions {
+  captureFilter?: string;
+  maxResults?: number;
+  timeoutMs?: number;
+}
+
+/**
+ * Parses S-expression query string into structured query patterns.
+ */
 export function parseSExpressionQuery(queryString: string): QueryPattern[] {
   const patterns: QueryPattern[] = [];
 
-  // Remove comments (lines starting with ';')
   const cleaned = queryString
     .split('\n')
     .map((line) => line.replace(/;.*$/, ''))
@@ -34,13 +49,11 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
 
   if (!cleaned) return [];
 
-  // Handle alternations [ (pattern1) (pattern2) ]
   let working = cleaned;
   if (working.startsWith('[') && working.endsWith(']')) {
     working = working.slice(1, -1).trim();
   }
 
-  // Tokenize parentheses, identifiers, captures @foo, strings, and predicates #foo
   const tokens: string[] = [];
   let idx = 0;
   while (idx < working.length) {
@@ -58,378 +71,280 @@ export function parseSExpressionQuery(queryString: string): QueryPattern[] {
       let str = '';
       idx++;
       while (idx < working.length && working[idx] !== '"') {
-        if (working[idx] === '\\') {
-          idx++;
-          str += working[idx] || '';
+        if (working[idx] === '\\' && idx + 1 < working.length) {
+          str += working[idx + 1];
+          idx += 2;
         } else {
           str += working[idx];
+          idx++;
         }
-        idx++;
       }
-      idx++; // skip closing "
+      idx++;
       tokens.push(`"${str}"`);
       continue;
     }
 
-    // Read identifier/word/predicate/quantified symbol
     let word = '';
-    while (idx < working.length && !/\s|\(|\)|\[|\]/.test(working[idx])) {
+    while (idx < working.length && !/\s|[()[\]"]/.test(working[idx])) {
       word += working[idx];
       idx++;
     }
-    if (word) {
-      tokens.push(word);
-    }
+    if (word) tokens.push(word);
   }
 
-  // Parse pattern tree
-  let pos = 0;
-  while (pos < tokens.length) {
-    if (tokens[pos] === '(') {
-      const parsed = parsePatternNode(tokens);
-      if (parsed) {
-        patterns.push(parsed);
-      }
-    } else {
-      pos++;
+  let tIdx = 0;
+
+  function parsePattern(): QueryPattern | null {
+    if (tIdx >= tokens.length || tokens[tIdx] !== '(') return null;
+    tIdx++; // consume '('
+
+    let field: string | undefined;
+    const negatedFields: string[] = [];
+    let isImmediate = false;
+
+    if (tokens[tIdx] === '.') {
+      isImmediate = true;
+      tIdx++;
     }
-  }
 
-  function parsePatternNode(toks: string[]): QueryPattern | null {
-    if (toks[pos] !== '(') return null;
-    pos++; // consume '('
+    if (tIdx < tokens.length && tokens[tIdx]?.endsWith(':')) {
+      field = tokens[tIdx].slice(0, -1);
+      tIdx++;
+    }
 
-    const first = toks[pos];
-    pos++; // consume node type
+    while (tIdx < tokens.length && tokens[tIdx]?.startsWith('!')) {
+      negatedFields.push(tokens[tIdx].slice(1));
+      tIdx++;
+    }
 
-    let targetNodeType = first || '*';
+    if (tIdx >= tokens.length || tokens[tIdx] === ')') {
+      if (tokens[tIdx] === ')') tIdx++;
+      return null;
+    }
+
+    const targetNodeType = tokens[tIdx++];
+    let captureName: string | undefined;
     let quantifier: '+' | '*' | '?' | '1' = '1';
+    const childPatterns: QueryPattern[] = [];
+    const predicates: QueryPredicate[] = [];
 
-    if (targetNodeType.endsWith('+')) {
-      quantifier = '+';
-      targetNodeType = targetNodeType.slice(0, -1);
-    } else if (targetNodeType.endsWith('*')) {
-      quantifier = '*';
-      targetNodeType = targetNodeType.slice(0, -1);
-    } else if (targetNodeType.endsWith('?')) {
-      quantifier = '?';
-      targetNodeType = targetNodeType.slice(0, -1);
+    while (tIdx < tokens.length && tokens[tIdx] !== ')') {
+      const tok = tokens[tIdx];
+
+      if (tok === '(') {
+        if (tokens[tIdx + 1]?.startsWith('#')) {
+          tIdx++; // consume '('
+          const predTok = tokens[tIdx++];
+          const predType = predTok.slice(1).replace('?', '') as PredicateType;
+          const capTok = tokens[tIdx++];
+          const capture = capTok.startsWith('@') ? capTok.slice(1) : capTok;
+
+          const args: string[] = [];
+          while (tIdx < tokens.length && tokens[tIdx] !== ')') {
+            const raw = tokens[tIdx++];
+            args.push(raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw);
+          }
+          if (tokens[tIdx] === ')') tIdx++;
+
+          if (predType === 'eq' || predType === 'not-eq') {
+            if (args[0]?.startsWith('@')) {
+              predicates.push({
+                type: predType,
+                capture,
+                otherCapture: args[0].slice(1),
+              });
+            } else {
+              predicates.push({
+                type: predType,
+                capture,
+                value: args[0],
+              });
+            }
+          } else if (predType === 'match' || predType === 'not-match') {
+            try {
+              predicates.push({
+                type: predType,
+                capture,
+                regex: new RegExp(args[0] || ''),
+              });
+            } catch {
+              // Ignore invalid regex in query
+            }
+          } else if (predType === 'any-of') {
+            predicates.push({
+              type: 'any-of',
+              capture,
+              values: args,
+            });
+          }
+        } else {
+          const child = parsePattern();
+          if (child) childPatterns.push(child);
+        }
+      } else if (tok.startsWith('@')) {
+        captureName = tok.slice(1);
+        tIdx++;
+      } else if (tok === '+' || tok === '*' || tok === '?') {
+        quantifier = tok;
+        tIdx++;
+      } else {
+        tIdx++;
+      }
     }
 
-    const pattern: QueryPattern = {
-      targetNodeType: targetNodeType || '*',
+    if (tIdx < tokens.length && tokens[tIdx] === ')') {
+      tIdx++; // consume ')'
+    }
+
+    if (tIdx < tokens.length && tokens[tIdx]?.startsWith('@') && !captureName) {
+      captureName = tokens[tIdx++].slice(1);
+    }
+    if (tIdx < tokens.length && (tokens[tIdx] === '+' || tokens[tIdx] === '*' || tokens[tIdx] === '?')) {
+      quantifier = tokens[tIdx++] as any;
+    }
+
+    return {
+      targetNodeType,
+      field,
+      negatedFields,
       quantifier,
-      negatedFields: [],
-      childPatterns: [],
-      predicates: [],
+      captureName,
+      childPatterns,
+      predicates,
+      isImmediateChild: isImmediate,
     };
-
-    while (pos < toks.length && toks[pos] !== ')') {
-      const current = toks[pos];
-
-      // Immediate child sibling anchor (.)
-      if (current === '.') {
-        pos++;
-        if (pos < toks.length && toks[pos] === '(') {
-          const child = parsePatternNode(toks);
-          if (child) {
-            child.isImmediateChild = true;
-            pattern.childPatterns.push(child);
-          }
-        }
-        continue;
-      }
-
-      // Check if parentheses encapsulate a predicate e.g. (#match? @fn "^get_")
-      if (current === '(' && toks[pos + 1]?.startsWith('#')) {
-        pos++; // consume '('
-        parsePredicate(pattern, toks);
-        if (pos < toks.length && toks[pos] === ')') {
-          pos++; // consume ')'
-        }
-        continue;
-      }
-
-      // Check if parentheses encapsulate a negated field e.g. (!parameters)
-      if (current === '(' && toks[pos + 1]?.startsWith('!')) {
-        pos++; // consume '('
-        const negField = (toks[pos] || '').slice(1);
-        if (negField) pattern.negatedFields.push(negField);
-        pos++;
-        if (pos < toks.length && toks[pos] === ')') {
-          pos++; // consume ')'
-        }
-        continue;
-      }
-
-      // Child sub-pattern
-      if (current === '(') {
-        const child = parsePatternNode(toks);
-        if (child) {
-          pattern.childPatterns.push(child);
-        }
-        continue;
-      }
-
-      // Negated field (!field)
-      if (current.startsWith('!')) {
-        const negField = current.slice(1);
-        if (negField) pattern.negatedFields.push(negField);
-        pos++;
-        continue;
-      }
-
-      // Named field (field_name:)
-      if (current.endsWith(':')) {
-        const fieldName = current.slice(0, -1);
-        pos++;
-        if (pos < toks.length && toks[pos] === '(') {
-          const child = parsePatternNode(toks);
-          if (child) {
-            child.field = fieldName;
-            pattern.childPatterns.push(child);
-          }
-        }
-        continue;
-      }
-
-      // Capture name (@func.name)
-      if (current.startsWith('@')) {
-        pattern.captureName = current.slice(1);
-        pos++;
-        continue;
-      }
-
-      // Bare predicates without parentheses e.g. #match? @fn "^get_"
-      if (current.startsWith('#')) {
-        parsePredicate(pattern, toks);
-        continue;
-      }
-
-      pos++;
-    }
-
-    if (pos < toks.length && toks[pos] === ')') {
-      pos++; // consume ')'
-    }
-
-    // Check if trailing quantifier exists after closing paren e.g. (statement)+
-    if (pos < toks.length && (toks[pos] === '+' || toks[pos] === '*' || toks[pos] === '?')) {
-      pattern.quantifier = toks[pos] as '+' | '*' | '?';
-      pos++;
-    }
-
-    // Check if trailing @capture exists after closing paren e.g. (identifier) @name
-    if (pos < toks.length && toks[pos]?.startsWith('@')) {
-      pattern.captureName = toks[pos].slice(1);
-      pos++;
-    }
-
-    return pattern;
   }
 
-  function parsePredicate(pattern: QueryPattern, toks: string[]) {
-    const predName = toks[pos];
-    pos++;
-
-    if (predName === '#eq?' || predName === '#not-eq?') {
-      const cap = (toks[pos] || '').replace(/^@/, '');
-      pos++;
-      const valToken = toks[pos] || '';
-      pos++;
-
-      if (valToken.startsWith('@')) {
-        // Comparison between two captures: (#eq? @c1 @c2)
-        pattern.predicates.push({
-          type: predName === '#eq?' ? 'eq' : 'not-eq',
-          capture: cap,
-          otherCapture: valToken.slice(1),
-        });
-      } else {
-        // Comparison between capture and string literal
-        pattern.predicates.push({
-          type: predName === '#eq?' ? 'eq' : 'not-eq',
-          capture: cap,
-          value: valToken.replace(/^"|"$/g, ''),
-        });
-      }
-    } else if (predName === '#match?' || predName === '#not-match?') {
-      const cap = (toks[pos] || '').replace(/^@/, '');
-      pos++;
-      const patternStr = (toks[pos] || '').replace(/^"|"$/g, '');
-      pos++;
-      try {
-        pattern.predicates.push({
-          type: predName === '#match?' ? 'match' : 'not-match',
-          capture: cap,
-          value: patternStr,
-          regex: new RegExp(patternStr),
-        });
-      } catch {
-        // ignore invalid regex
-      }
-    } else if (predName === '#any-of?') {
-      const cap = (toks[pos] || '').replace(/^@/, '');
-      pos++;
-      const allowedValues: string[] = [];
-      while (
-        pos < toks.length &&
-        (toks[pos].startsWith('"') ||
-          (!toks[pos].startsWith('#') && !toks[pos].startsWith('(') && toks[pos] !== ')'))
-      ) {
-        allowedValues.push(toks[pos].replace(/^"|"$/g, ''));
-        pos++;
-      }
-      pattern.predicates.push({ type: 'any-of', capture: cap, values: allowedValues });
-    }
+  while (tIdx < tokens.length) {
+    const pat = parsePattern();
+    if (pat) patterns.push(pat);
+    else tIdx++;
   }
 
   return patterns;
 }
 
+/**
+ * Matches an ASTNode against parsed QueryPatterns with full predicate support.
+ */
 export function executeQuery(
   ast: ASTNode,
   queryString: string,
-  options: {
-    maxResults?: number;
-    captureFilter?: string;
-    compact?: boolean;
-  } = {}
+  options?: QueryOptions
 ): QueryMatch[] {
   const patterns = parseSExpressionQuery(queryString);
+  if (patterns.length === 0) return [];
+
+  const maxResults = options?.maxResults ?? 100;
+  const captureFilter = options?.captureFilter;
   const matches: QueryMatch[] = [];
-  const maxResults = options.maxResults || 100;
 
-  function matchPatternOnNode(pattern: QueryPattern, node: ASTNode): QueryCapture[] | null {
-    if (pattern.targetNodeType !== '*' && node.type !== pattern.targetNodeType) {
-      return null;
+  function matchInSubtree(node: ASTNode, pat: QueryPattern, capturesMap: Map<string, QueryCapture>): boolean {
+    if (pat.targetNodeType !== '_' && node.type !== pat.targetNodeType) {
+      return false;
     }
-    if (pattern.field && node.field && node.field !== pattern.field) {
-      return null;
+    if (pat.field && node.field !== pat.field) {
+      return false;
     }
-
-    // Check negated fields (!field)
-    for (const negField of pattern.negatedFields) {
-      const hasNegatedField = node.children.some((c) => c.field === negField);
-      if (hasNegatedField) {
-        return null;
+    if (pat.negatedFields.length > 0) {
+      for (const neg of pat.negatedFields) {
+        if (node.children.some((c) => c.field === neg)) {
+          return false;
+        }
       }
     }
 
-    const captures: QueryCapture[] = [];
-
-    if (pattern.captureName) {
-      captures.push({
-        capture: pattern.captureName,
+    if (pat.captureName) {
+      capturesMap.set(pat.captureName, {
+        capture: pat.captureName,
         text: node.text || '',
         nodeType: node.type,
+        node_type: node.type,
         startPoint: node.startPoint,
         endPoint: node.endPoint,
+        location: { start: node.startPoint, end: node.endPoint },
       });
     }
 
-    // Check child patterns
-    for (const cp of pattern.childPatterns) {
-      let matchedCount = 0;
-
-      function matchInSubtree(parent: ASTNode): QueryCapture[] | null {
-        for (const childNode of parent.children) {
-          const subCaps = matchPatternOnNode(cp, childNode);
-          if (subCaps) return subCaps;
-          if (childNode.type === 'block' || childNode.type === 'statement_block' || childNode.type === 'body') {
-            const nestedCaps = matchInSubtree(childNode);
-            if (nestedCaps) return nestedCaps;
-          }
+    function findMatchInDirectOrContainers(parent: ASTNode, cPat: QueryPattern): boolean {
+      for (const childNode of parent.children) {
+        if (matchInSubtree(childNode, cPat, capturesMap)) {
+          return true;
         }
-        return null;
-      }
-
-      for (const childNode of node.children) {
-        const subCaps = matchPatternOnNode(cp, childNode);
-        if (subCaps) {
-          captures.push(...subCaps);
-          matchedCount++;
-          if (cp.quantifier !== '*' && cp.quantifier !== '+') {
-            break;
-          }
-        } else if (childNode.type === 'block' || childNode.type === 'statement_block') {
-          const nestedCaps = matchInSubtree(childNode);
-          if (nestedCaps) {
-            captures.push(...nestedCaps);
-            matchedCount++;
-            if (cp.quantifier !== '*' && cp.quantifier !== '+') {
-              break;
-            }
+        if (
+          !cPat.isImmediateChild &&
+          (childNode.type === 'block' ||
+            childNode.type === 'statement_block' ||
+            childNode.type === 'class_body' ||
+            childNode.type === 'declaration_list' ||
+            childNode.type === 'field_declaration_list')
+        ) {
+          if (findMatchInDirectOrContainers(childNode, cPat)) {
+            return true;
           }
         }
       }
+      return false;
+    }
 
-      if (matchedCount === 0) {
-        if (cp.quantifier === '+' || cp.quantifier === '1') {
-          // Required child node was not present
-          return null;
-        }
+    for (const childPat of pat.childPatterns) {
+      const childMatched = findMatchInDirectOrContainers(node, childPat);
+      if (!childMatched && childPat.quantifier !== '?' && childPat.quantifier !== '*') {
+        return false;
       }
     }
 
-    // Predicates evaluation
-    for (const pred of pattern.predicates) {
-      const found = captures.find((c) => c.capture === pred.capture);
-      const targetText = found ? found.text : '';
+    // Evaluate predicates
+    for (const pred of pat.predicates) {
+      const cap = capturesMap.get(pred.capture);
+      if (!cap) return false;
 
-      switch (pred.type) {
-        case 'eq':
-          if (pred.otherCapture) {
-            const otherFound = captures.find((c) => c.capture === pred.otherCapture);
-            if (!found || !otherFound || targetText !== otherFound.text) return null;
-          } else {
-            if (!found || targetText !== pred.value) return null;
-          }
-          break;
-
-        case 'not-eq':
-          if (pred.otherCapture) {
-            const otherFound = captures.find((c) => c.capture === pred.otherCapture);
-            if (found && otherFound && targetText === otherFound.text) return null;
-          } else {
-            if (found && targetText === pred.value) return null;
-          }
-          break;
-
-        case 'match':
-          if (!found || !pred.regex || !pred.regex.test(targetText)) return null;
-          break;
-
-        case 'not-match':
-          if (found && pred.regex && pred.regex.test(targetText)) return null;
-          break;
-
-        case 'any-of':
-          if (!found || !pred.values || !pred.values.includes(targetText)) return null;
-          break;
+      if (pred.type === 'eq') {
+        if (pred.otherCapture) {
+          const other = capturesMap.get(pred.otherCapture);
+          if (!other || cap.text !== other.text) return false;
+        } else if (cap.text !== pred.value) {
+          return false;
+        }
       }
+      if (pred.type === 'not-eq') {
+        if (pred.otherCapture) {
+          const other = capturesMap.get(pred.otherCapture);
+          if (other && cap.text === other.text) return false;
+        } else if (cap.text === pred.value) {
+          return false;
+        }
+      }
+      if (pred.type === 'match' && pred.regex && !pred.regex.test(cap.text)) return false;
+      if (pred.type === 'not-match' && pred.regex && pred.regex.test(cap.text)) return false;
+      if (pred.type === 'any-of' && pred.values && !pred.values.includes(cap.text)) return false;
     }
 
-    return captures;
+    return true;
   }
 
   function search(node: ASTNode) {
     if (matches.length >= maxResults) return;
 
     for (let pIdx = 0; pIdx < patterns.length; pIdx++) {
-      const p = patterns[pIdx];
-      const caps = matchPatternOnNode(p, node);
-      if (caps && caps.length > 0) {
-        let filteredCaps = caps;
-        if (options.captureFilter) {
-          filteredCaps = caps.filter((c) => c.capture === options.captureFilter);
+      const pat = patterns[pIdx];
+      const capturesMap = new Map<string, QueryCapture>();
+
+      if (matchInSubtree(node, pat, capturesMap)) {
+        let capturesList = Array.from(capturesMap.values());
+        if (captureFilter) {
+          capturesList = capturesList.filter((c) => c.capture === captureFilter);
         }
 
-        if (filteredCaps.length > 0) {
+        if (capturesList.length > 0) {
           matches.push({
             patternIndex: pIdx,
-            captures: filteredCaps,
-            matchedText: node.text?.trim() || '',
+            captures: capturesList,
+            matchedText: node.text,
+            capture: capturesList[0]?.capture,
+            text: capturesList[0]?.text,
+            location: capturesList[0]?.location,
+            node_type: capturesList[0]?.nodeType,
           });
         }
       }
@@ -442,4 +357,106 @@ export function executeQuery(
 
   search(ast);
   return matches;
+}
+
+/**
+ * Native S-expression query execution on web-tree-sitter Tree.
+ */
+export function executeNativeQuery(
+  tree: Parser.Tree,
+  tsLanguage: Parser.Language,
+  queryString: string,
+  options?: QueryOptions
+): QueryMatch[] {
+  const maxResults = options?.maxResults ?? 100;
+  const captureFilter = options?.captureFilter;
+
+  let query: Parser.Query | null = null;
+  try {
+    query = tsLanguage.query(queryString);
+  } catch {
+    // If native S-expression syntax has custom extensions, fallback to AST matcher
+    const ast = treeCache.get(tree.rootNode.text, 'current')
+      ? null
+      : null;
+    return [];
+  }
+
+  const results: QueryMatch[] = [];
+
+  try {
+    const rawMatches = query.matches(tree.rootNode);
+
+    for (let i = 0; i < rawMatches.length; i++) {
+      if (results.length >= maxResults) break;
+
+      const m = rawMatches[i];
+      const captures: QueryCapture[] = [];
+
+      for (const cap of m.captures) {
+        if (captureFilter && cap.name !== captureFilter) {
+          continue;
+        }
+
+        const node = cap.node;
+        captures.push({
+          capture: cap.name,
+          text: node.text,
+          nodeType: node.type,
+          node_type: node.type,
+          startPoint: {
+            row: node.startPosition.row,
+            column: node.startPosition.column,
+          },
+          endPoint: {
+            row: node.endPosition.row,
+            column: node.endPosition.column,
+          },
+          location: {
+            start: { row: node.startPosition.row, column: node.startPosition.column },
+            end: { row: node.endPosition.row, column: node.endPosition.column },
+          },
+        });
+      }
+
+      if (captures.length > 0) {
+        const matchedText = captures[0]?.text || '';
+        results.push({
+          patternIndex: m.pattern,
+          captures,
+          matchedText,
+          capture: captures[0]?.capture,
+          text: matchedText,
+          location: captures[0]?.location,
+          node_type: captures[0]?.nodeType,
+        });
+      }
+    }
+  } finally {
+    query.delete();
+  }
+
+  return results;
+}
+
+/**
+ * Executes a query directly on source code using cached or fresh WebAssembly Tree.
+ */
+export async function executeQueryOnSource(
+  source: string,
+  language: string,
+  queryString: string,
+  options?: QueryOptions
+): Promise<QueryMatch[]> {
+  const parsed = await treeCache.getOrParseTree(source, language);
+  if (!parsed) {
+    return [];
+  }
+  const nativeResults = executeNativeQuery(parsed.tree, parsed.tsLanguage, queryString, options);
+  if (nativeResults.length > 0) return nativeResults;
+
+  // Fallback to pattern matcher
+  const { syntaxNodeToASTNode } = await import('./treeSitter');
+  const ast = syntaxNodeToASTNode(parsed.tree.rootNode);
+  return executeQuery(ast, queryString, options);
 }

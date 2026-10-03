@@ -16,6 +16,17 @@ export interface Location {
   end: Position;
 }
 
+export interface SyntaxDiagnostic {
+  type: string;
+  message?: string;
+  isMissing: boolean;
+  startPosition: Position;
+  endPosition: Position;
+  startByte: number;
+  endByte: number;
+  text?: string;
+}
+
 export interface ASTNode {
   id?: string;
   type: string;
@@ -34,6 +45,37 @@ export interface ASTNode {
   children: ASTNode[];
   depth?: number;
   isApproximate?: boolean;
+  hasError?: boolean;
+  errors?: SyntaxDiagnostic[];
+}
+
+export interface OutlineItem {
+  name: string;
+  kind: string;
+  signature?: string;
+  location: Location;
+  startByte: number;
+  endByte: number;
+  children?: OutlineItem[];
+}
+
+export interface SymbolReference {
+  file: string;
+  name: string;
+  location: Location;
+  startByte: number;
+  endByte: number;
+  contextLine?: string;
+}
+
+export interface FunctionComplexity {
+  name: string;
+  signature?: string;
+  location: Location;
+  startLine: number;
+  endLine: number;
+  lineCount: number;
+  cyclomaticComplexity: number;
 }
 
 export type SymbolType =

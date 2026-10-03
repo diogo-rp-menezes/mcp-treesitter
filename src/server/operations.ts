@@ -1,6 +1,6 @@
 /**
- * AST/Tree-sitter Language-Agnostic Specification - Section 5
- * Core Operations API Implementation
+ * AST/Tree-sitter Language-Agnostic Specification - Section 5 & LLM Enhancements
+ * Core Operations API Implementation with Native Tree-sitter & Diagnostics
  */
 
 import path from 'path';
@@ -9,6 +9,7 @@ import {
   Project,
   Symbol,
   SymbolType,
+  Location,
   ProjectAnalysis,
   EntryPoint,
   BuildFile,
@@ -20,18 +21,22 @@ import {
   SimilarCodeMatch,
   ASTNode,
   FileInfo,
+  OutlineItem,
+  SymbolReference,
+  FunctionComplexity,
+  SyntaxDiagnostic,
 } from './types';
 import { LanguageRegistry, languageRegistry as defaultLanguageRegistry } from './languageRegistry';
 import { TreeCache, treeCache as defaultTreeCache } from './treeCache';
 import { validateFileAccess } from './security';
-import { parseWithTreeSitter, syntaxNodeToASTNode } from './treeSitter';
+import { syntaxNodeToASTNode, collectSyntaxErrors, parseRawTree } from './treeSitter';
 import { DEFAULT_SYMBOL_TYPES, TEMPLATES } from './templates';
-import { executeQuery } from './queryEngine';
-import { calculateComplexity } from './complexity';
-import { FileAccessError, QueryError } from './errors';
+import { executeNativeQuery } from './queryEngine';
+import { calculateComplexity, collectAstMetrics, countLines } from './complexity';
+import { FileAccessError, QueryError, LanguageNotFoundError } from './errors';
 
 /**
- * 5.1 Symbol Extraction
+ * 5.1 Symbol Extraction using cached native Tree and queries
  */
 export async function extractSymbols(
   project: Project,
@@ -48,22 +53,26 @@ export async function extractSymbols(
   }
 
   const lang = file.language || langRegistry.languageForFile(filePath) || 'python';
+  const canonicalLang = langRegistry.canonicalLanguageName(lang);
+
   const typesToExtract =
     symbolTypes && symbolTypes.length > 0
       ? symbolTypes
-      : DEFAULT_SYMBOL_TYPES[lang] || DEFAULT_SYMBOL_TYPES.default;
+      : DEFAULT_SYMBOL_TYPES[canonicalLang] || DEFAULT_SYMBOL_TYPES.default;
 
   const results: Record<string, Symbol[]> = {};
   for (const t of typesToExtract) {
     results[t] = [];
   }
 
-  const ast = await parseWithTreeSitter(file.content, lang);
-  if (!ast) {
+  const parsed = await defaultTreeCache.getOrParseTree(file.content, canonicalLang);
+  if (!parsed) {
     return results as Record<SymbolType, Symbol[]>;
   }
 
-  // Collect class location boundaries if excludeClassMethods is true
+  const { tree } = parsed;
+  const ast = syntaxNodeToASTNode(tree.rootNode);
+
   const classRanges: { start: number; end: number }[] = [];
 
   function scanNodes(node: ASTNode, parentClass?: string) {
@@ -234,6 +243,7 @@ export function analyzeProjectStructure(
     python: ['__main__.py', 'main.py', 'app.py', 'run.py', 'manage.py'],
     javascript: ['index.js', 'app.js', 'main.js', 'server.js'],
     typescript: ['index.ts', 'app.ts', 'main.ts', 'server.ts'],
+    tsx: ['App.tsx', 'index.tsx', 'main.tsx'],
     go: ['main.go'],
     rust: ['main.rs'],
     java: ['Main.java', 'App.java'],
@@ -303,6 +313,8 @@ export async function findDependencies(
   }
 
   const lang = file.language || langRegistry.languageForFile(filePath) || 'python';
+  const canonicalLang = langRegistry.canonicalLanguageName(lang);
+
   const deps: Dependencies = {
     imports: [],
     from_imports: [],
@@ -313,8 +325,11 @@ export async function findDependencies(
     uses: [],
   };
 
-  const ast = await parseWithTreeSitter(file.content, lang);
-  if (!ast) return deps;
+  const parsed = await defaultTreeCache.getOrParseTree(file.content, canonicalLang);
+  if (!parsed) return deps;
+
+  const { tree } = parsed;
+  const ast = syntaxNodeToASTNode(tree.rootNode);
 
   function traverse(node: ASTNode) {
     if (node.type === 'import_statement') {
@@ -350,7 +365,7 @@ export async function findDependencies(
 }
 
 /**
- * 5.4 Complexity Analysis (McCabes Cyclomatic Complexity with Appendix C Decision Nodes)
+ * 5.4 Complexity Analysis (McCabe Cyclomatic Complexity)
  */
 export async function analyzeCodeComplexity(
   project: Project,
@@ -364,9 +379,12 @@ export async function analyzeCodeComplexity(
   }
 
   const lang = file.language || langRegistry.languageForFile(filePath) || 'python';
-  const ast = await parseWithTreeSitter(file.content, lang);
+  const canonicalLang = langRegistry.canonicalLanguageName(lang);
 
-  const metrics = calculateComplexity(file.content, ast, lang);
+  const parsed = await defaultTreeCache.getOrParseTree(file.content, canonicalLang);
+  const ast = parsed ? syntaxNodeToASTNode(parsed.tree.rootNode) : null;
+
+  const metrics = calculateComplexity(file.content, ast, canonicalLang);
 
   return {
     line_count: metrics.lineCount,
@@ -378,8 +396,7 @@ export async function analyzeCodeComplexity(
     class_count: metrics.classCount,
     avg_function_lines: metrics.avgFunctionLines,
     cyclomatic_complexity: metrics.cyclomaticComplexity,
-    language: lang,
-    // Dual compatibility
+    language: canonicalLang,
     lineCount: metrics.lineCount,
     codeLines: metrics.codeLines,
     commentLines: metrics.commentLines,
@@ -458,7 +475,7 @@ export function searchText(
 }
 
 /**
- * 5.6 Tree-sitter Query Execution
+ * 5.6 Native Tree-sitter Query Execution
  */
 export async function queryCode(
   project: Project,
@@ -473,7 +490,6 @@ export async function queryCode(
   compact: boolean = false
 ): Promise<QueryMatch[]> {
   const matches: QueryMatch[] = [];
-
   const filesToQuery: { path: string; content: string; language: string }[] = [];
 
   if (filePath) {
@@ -498,28 +514,21 @@ export async function queryCode(
   for (const f of filesToQuery) {
     if (matches.length >= maxResults) break;
 
-    const ast = await parseWithTreeSitter(f.content, f.language);
-    if (!ast) continue;
+    const parsed = await cache.getOrParseTree(f.content, f.language);
+    if (!parsed) continue;
 
-    const queryResults = executeQuery(ast, queryString, {
+    const queryResults = executeNativeQuery(parsed.tree, parsed.tsLanguage, queryString, {
       captureFilter,
       maxResults: maxResults - matches.length,
     });
 
     for (const qr of queryResults) {
       if (matches.length >= maxResults) break;
-      for (const cap of qr.captures) {
-        matches.push({
-          capture: cap.capture,
-          text: includeSnippets ? cap.text : '',
-          location: { start: cap.startPoint, end: cap.endPoint },
-          node_type: cap.nodeType,
-          file: f.path,
-          patternIndex: qr.patternIndex,
-          captures: qr.captures,
-          matchedText: qr.matchedText,
-        });
-      }
+      matches.push({
+        ...qr,
+        file: f.path,
+        text: includeSnippets ? qr.text : '',
+      });
     }
   }
 
@@ -527,7 +536,7 @@ export async function queryCode(
 }
 
 /**
- * 5.7 Similar Code Detection (Containment Similarity)
+ * 5.7 Similar Code Detection
  */
 export async function findSimilarCode(
   project: Project,
@@ -538,10 +547,12 @@ export async function findSimilarCode(
   threshold: number = 0.5,
   maxResults: number = 10
 ): Promise<SimilarCodeMatch[]> {
-  const snippetAST = await parseWithTreeSitter(snippet, language);
-  if (!snippetAST) return [];
+  const canonical = langRegistry.canonicalLanguageName(language);
+  const parsedSnippet = await cache.getOrParseTree(snippet, canonical);
+  if (!parsedSnippet) return [];
 
-  // Build snippet structural fingerprint: set of (type:text) for leaves + type for interiors
+  const snippetAST = syntaxNodeToASTNode(parsedSnippet.tree.rootNode);
+
   const snippetFp = new Set<string>();
   function fingerprint(node: ASTNode, set: Set<string>) {
     if (!node.children || node.children.length === 0) {
@@ -559,13 +570,14 @@ export async function findSimilarCode(
   const candidates: SimilarCodeMatch[] = [];
 
   for (const [filePath, file] of project.files.entries()) {
-    const fLang = file.language || langRegistry.languageForFile(filePath) || '';
-    if (fLang.toLowerCase() !== language.toLowerCase()) continue;
+    const fLang = langRegistry.canonicalLanguageName(file.language || langRegistry.languageForFile(filePath) || '');
+    if (fLang !== canonical) continue;
 
-    const fileAST = await parseWithTreeSitter(file.content, fLang);
-    if (!fileAST) continue;
+    const parsedFile = await cache.getOrParseTree(file.content, fLang);
+    if (!parsedFile) continue;
 
-    // Traverse top-level blocks
+    const fileAST = syntaxNodeToASTNode(parsedFile.tree.rootNode);
+
     function scanBlocks(node: ASTNode) {
       const isBlock =
         node.type === 'function_definition' ||
@@ -579,7 +591,6 @@ export async function findSimilarCode(
         const blockFp = new Set<string>();
         fingerprint(node, blockFp);
 
-        // Containment similarity: |snippet_fp ∩ block_fp| / |snippet_fp|
         let intersection = 0;
         for (const token of snippetFp) {
           if (blockFp.has(token)) intersection++;
@@ -610,7 +621,7 @@ export async function findSimilarCode(
 }
 
 /**
- * 5.8 AST Retrieval (with cursor-based depth limiting)
+ * 5.8 AST Retrieval with Syntax Diagnostics
  */
 export async function getFileAST(
   project: Project,
@@ -627,42 +638,22 @@ export async function getFileAST(
   }
 
   const lang = file.language || langRegistry.languageForFile(filePath) || 'python';
-  const ast = await parseWithTreeSitter(file.content, lang);
-  if (!ast) {
+  const canonicalLang = langRegistry.canonicalLanguageName(lang);
+
+  const parsed = await cache.getOrParseTree(file.content, canonicalLang);
+  if (!parsed) {
     throw new FileAccessError(`Could not generate AST for '${filePath}'`);
   }
 
-  // Prune according to maxDepth and includeText
-  function prune(node: ASTNode, currentDepth: number): ASTNode {
-    const copy: ASTNode = {
-      id: node.id,
-      type: node.type,
-      isNamed: node.isNamed,
-      field: node.field,
-      startPoint: node.startPoint,
-      endPoint: node.endPoint,
-      start_point: node.startPoint,
-      end_point: node.endPoint,
-      startByte: node.startByte,
-      endByte: node.endByte,
-      start_byte: node.startByte,
-      end_byte: node.endByte,
-      text: includeText ? node.text : undefined,
-      depth: currentDepth,
-      children: [],
-    };
-
-    if (currentDepth < maxDepth && node.children) {
-      copy.children = node.children.map((c) => prune(c, currentDepth + 1));
-    }
-
-    return copy;
-  }
+  const rootAst = syntaxNodeToASTNode(parsed.tree.rootNode, undefined, {
+    maxDepth,
+    includeText,
+  });
 
   return {
     file: filePath,
-    language: lang,
-    tree: prune(ast, 0),
+    language: canonicalLang,
+    tree: rootAst,
   };
 }
 
@@ -692,7 +683,290 @@ export function findNodeAtPosition(
 }
 
 /**
- * 5.10 File Operations
+ * P2.1: Compact outline map for token budget optimization
+ */
+export async function getOutline(
+  project: Project,
+  filePath: string,
+  langRegistry: LanguageRegistry = defaultLanguageRegistry
+): Promise<OutlineItem[]> {
+  validateFileAccess(filePath, project.path);
+  const file = project.files.get(filePath);
+  if (!file) throw new FileAccessError(`File '${filePath}' not found`);
+
+  const lang = file.language || langRegistry.languageForFile(filePath) || 'python';
+  const symbols = await extractSymbols(project, filePath, langRegistry);
+
+  const items: OutlineItem[] = [];
+
+  for (const cls of symbols.classes || []) {
+    items.push({
+      name: cls.name,
+      kind: 'class',
+      location: cls.location,
+      startByte: 0,
+      endByte: 0,
+      children: [],
+    });
+  }
+
+  for (const fn of symbols.functions || []) {
+    items.push({
+      name: fn.name,
+      kind: fn.metadata?.parent ? 'method' : 'function',
+      signature: fn.metadata?.signature || fn.name,
+      location: fn.location,
+      startByte: 0,
+      endByte: 0,
+    });
+  }
+
+  for (const iface of symbols.interfaces || []) {
+    items.push({
+      name: iface.name,
+      kind: 'interface',
+      location: iface.location,
+      startByte: 0,
+      endByte: 0,
+    });
+  }
+
+  return items;
+}
+
+/**
+ * P2.2: Extract exact byte slice source for a named symbol
+ */
+export async function getSymbolSource(
+  project: Project,
+  filePath: string,
+  symbolName: string,
+  langRegistry: LanguageRegistry = defaultLanguageRegistry
+): Promise<{ name: string; language: string; source: string; location: Location } | null> {
+  validateFileAccess(filePath, project.path);
+  const file = project.files.get(filePath);
+  if (!file) throw new FileAccessError(`File '${filePath}' not found`);
+
+  const lang = file.language || langRegistry.languageForFile(filePath) || 'python';
+  const canonicalLang = langRegistry.canonicalLanguageName(lang);
+
+  const parsed = await defaultTreeCache.getOrParseTree(file.content, canonicalLang);
+  if (!parsed) return null;
+
+  const ast = syntaxNodeToASTNode(parsed.tree.rootNode);
+
+  let matchedNode: ASTNode | null = null;
+
+  function findSymbolNode(node: ASTNode) {
+    const isNamedDef =
+      node.type === 'function_definition' ||
+      node.type === 'function_declaration' ||
+      node.type === 'class_definition' ||
+      node.type === 'class_declaration' ||
+      node.type === 'method_definition';
+
+    if (isNamedDef) {
+      const nameNode = node.children.find(
+        (c) =>
+          c.field === 'name' ||
+          c.type === 'identifier' ||
+          c.type === 'property_identifier' ||
+          c.type === 'type_identifier'
+      );
+      if (nameNode?.text === symbolName) {
+        matchedNode = node;
+        return;
+      }
+    }
+
+    for (const c of node.children) {
+      if (matchedNode) return;
+      findSymbolNode(c);
+    }
+  }
+
+  findSymbolNode(ast);
+
+  if (!matchedNode) return null;
+
+  const target: ASTNode = matchedNode;
+  const sourceSlice = file.content.slice(target.startByte, target.endByte);
+
+  return {
+    name: symbolName,
+    language: canonicalLang,
+    source: sourceSlice,
+    location: { start: target.startPoint, end: target.endPoint },
+  };
+}
+
+/**
+ * P2.3: Find identifier references across project files
+ */
+export async function findReferences(
+  project: Project,
+  symbolName: string,
+  language?: string,
+  langRegistry: LanguageRegistry = defaultLanguageRegistry
+): Promise<SymbolReference[]> {
+  const references: SymbolReference[] = [];
+
+  for (const [filePath, file] of project.files.entries()) {
+    const fLang = langRegistry.canonicalLanguageName(file.language || langRegistry.languageForFile(filePath) || '');
+    if (language && fLang !== langRegistry.canonicalLanguageName(language)) continue;
+
+    const parsed = await defaultTreeCache.getOrParseTree(file.content, fLang);
+    if (!parsed) continue;
+
+    const queryStr = `(identifier) @ref`;
+    try {
+      const matches = executeNativeQuery(parsed.tree, parsed.tsLanguage, queryStr);
+      for (const m of matches) {
+        for (const cap of m.captures || []) {
+          if (cap.text === symbolName) {
+            const lines = file.content.split(/\r?\n/);
+            const lineText = lines[cap.startPoint.row] || '';
+            references.push({
+              file: filePath,
+              name: symbolName,
+              location: cap.location || { start: cap.startPoint, end: cap.endPoint },
+              startByte: 0,
+              endByte: 0,
+              contextLine: lineText.trim(),
+            });
+          }
+        }
+      }
+    } catch {
+      // Ignore query errors on individual files
+    }
+  }
+
+  return references;
+}
+
+/**
+ * P2.4: Safe syntax-validated replacement that rejects new ERROR nodes
+ */
+export async function safeReplaceNode(
+  project: Project,
+  filePath: string,
+  startByte: number,
+  endByte: number,
+  replacementText: string,
+  langRegistry: LanguageRegistry = defaultLanguageRegistry
+): Promise<{ success: boolean; newContent: string; newErrors: SyntaxDiagnostic[]; message: string }> {
+  validateFileAccess(filePath, project.path);
+  const file = project.files.get(filePath);
+  if (!file) throw new FileAccessError(`File '${filePath}' not found`);
+
+  const lang = file.language || langRegistry.languageForFile(filePath) || 'python';
+  const canonicalLang = langRegistry.canonicalLanguageName(lang);
+
+  const oldParsed = await defaultTreeCache.getOrParseTree(file.content, canonicalLang);
+  const oldErrors = oldParsed ? collectSyntaxErrors(oldParsed.tree.rootNode) : [];
+
+  const newContent = file.content.slice(0, startByte) + replacementText + file.content.slice(endByte);
+
+  const newParsed = await parseRawTree(newContent, canonicalLang);
+  if (!newParsed) {
+    return {
+      success: false,
+      newContent: file.content,
+      newErrors: [],
+      message: `Failed to parse language '${canonicalLang}'`,
+    };
+  }
+
+  const newErrors = collectSyntaxErrors(newParsed.tree.rootNode);
+
+  // If new errors were introduced that didn't exist before or root has error
+  if (newErrors.length > oldErrors.length || (newParsed.tree.rootNode.hasError && !oldParsed?.tree.rootNode.hasError)) {
+    newParsed.tree.delete();
+    return {
+      success: false,
+      newContent: file.content,
+      newErrors,
+      message: `Replacement rejected: introduced syntax error(s)`,
+    };
+  }
+
+  newParsed.tree.delete();
+
+  // Update file content in project
+  file.content = newContent;
+  file.sizeBytes = Buffer.byteLength(newContent, 'utf8');
+  file.lastModified = new Date().toISOString();
+
+  return {
+    success: true,
+    newContent,
+    newErrors: [],
+    message: 'Node replaced and validated successfully',
+  };
+}
+
+/**
+ * P2.5: Function-level Cyclomatic Complexity
+ */
+export async function analyzeFunctionComplexity(
+  project: Project,
+  filePath: string,
+  langRegistry: LanguageRegistry = defaultLanguageRegistry
+): Promise<FunctionComplexity[]> {
+  validateFileAccess(filePath, project.path);
+  const file = project.files.get(filePath);
+  if (!file) throw new FileAccessError(`File '${filePath}' not found`);
+
+  const lang = file.language || langRegistry.languageForFile(filePath) || 'python';
+  const canonicalLang = langRegistry.canonicalLanguageName(lang);
+
+  const parsed = await defaultTreeCache.getOrParseTree(file.content, canonicalLang);
+  if (!parsed) return [];
+
+  const ast = syntaxNodeToASTNode(parsed.tree.rootNode);
+  const results: FunctionComplexity[] = [];
+
+  function scan(node: ASTNode) {
+    const isFunc =
+      node.type === 'function_definition' ||
+      node.type === 'function_declaration' ||
+      node.type === 'method_definition' ||
+      node.type === 'method_declaration';
+
+    if (isFunc) {
+      const nameNode = node.children.find(
+        (c) =>
+          c.field === 'name' ||
+          c.type === 'identifier' ||
+          c.type === 'property_identifier' ||
+          c.type === 'field_identifier'
+      );
+      const name = nameNode?.text || 'anonymous';
+      const lineCount = Math.max(1, node.endPoint.row - node.startPoint.row + 1);
+      const metrics = collectAstMetrics(node);
+
+      results.push({
+        name,
+        location: { start: node.startPoint, end: node.endPoint },
+        startLine: node.startPoint.row + 1,
+        endLine: node.endPoint.row + 1,
+        lineCount,
+        cyclomaticComplexity: metrics.cyclomaticComplexity,
+      });
+    }
+
+    for (const c of node.children) {
+      scan(c);
+    }
+  }
+
+  scan(ast);
+  return results;
+}
+
+/**
+ * File Operations
  */
 export function listProjectFiles(
   project: Project,

@@ -1,6 +1,6 @@
 /**
  * AST/Tree-sitter Language-Agnostic Specification - Section 3
- * Language Registry Interface & Extension Mapping
+ * Language Registry Interface & Accurate Extension Mapping
  */
 
 import path from 'path';
@@ -11,6 +11,7 @@ import {
   LANGUAGE_TO_WASM_MAP,
   isTreeSitterLanguageSupported,
 } from './treeSitter';
+import { LanguageNotFoundError } from './errors';
 
 export interface InstallableLanguage {
   identifier: string;
@@ -21,14 +22,19 @@ export class LanguageRegistry {
   private parserCache = new Map<string, Parser>();
 
   /**
-   * Default extension to language mapping per Section 3.2 of the specification.
+   * Verified extension to grammar mapping with real WebAssembly binaries.
+   * TSX is explicitly mapped to 'tsx' to prevent syntax corruption.
    */
   public static readonly EXTENSION_MAP: Record<string, string> = {
     '.py': 'python',
     '.js': 'javascript',
     '.jsx': 'javascript',
+    '.mjs': 'javascript',
+    '.cjs': 'javascript',
     '.ts': 'typescript',
-    '.tsx': 'typescript',
+    '.mts': 'typescript',
+    '.cts': 'typescript',
+    '.tsx': 'tsx',
     '.rs': 'rust',
     '.go': 'go',
     '.java': 'java',
@@ -48,41 +54,40 @@ export class LanguageRegistry {
     '.scala': 'scala',
     '.dart': 'dart',
     '.lua': 'lua',
-    '.hs': 'haskell',
-    '.ml': 'ocaml',
     '.sh': 'bash',
     '.bash': 'bash',
     '.zsh': 'bash',
     '.yaml': 'yaml',
     '.yml': 'yaml',
     '.json': 'json',
-    '.md': 'markdown',
-    '.markdown': 'markdown',
     '.html': 'html',
     '.htm': 'html',
     '.css': 'css',
-    '.scss': 'scss',
-    '.sass': 'scss',
-    '.sql': 'sql',
-    '.proto': 'proto',
-    '.elm': 'elm',
-    '.clj': 'clojure',
-    '.ex': 'elixir',
-    '.exs': 'elixir',
-    '.jl': 'julia',
-    '.apl': 'apl',
+    '.scss': 'css',
+    '.less': 'css',
     '.toml': 'toml',
     '.vue': 'vue',
     '.zig': 'zig',
+    '.ml': 'ocaml',
+    '.res': 'rescript',
+    '.resi': 'rescript',
+    '.ex': 'elixir',
+    '.exs': 'elixir',
+    '.el': 'elisp',
+    '.sol': 'solidity',
+    '.elm': 'elm',
+    '.m': 'objc',
+    '.mm': 'objc',
   };
 
   /**
-   * Display names for installable/available languages.
+   * Display names for available languages with verified WASM files.
    */
   public static readonly DISPLAY_NAMES: Record<string, string> = {
     python: 'Python',
     javascript: 'JavaScript',
     typescript: 'TypeScript',
+    tsx: 'TypeScript JSX (TSX)',
     rust: 'Rust',
     go: 'Go',
     c: 'C',
@@ -96,27 +101,25 @@ export class LanguageRegistry {
     scala: 'Scala',
     dart: 'Dart',
     lua: 'Lua',
-    haskell: 'Haskell',
-    ocaml: 'OCaml',
     bash: 'Bash / Shell',
     yaml: 'YAML',
     json: 'JSON',
-    markdown: 'Markdown',
     html: 'HTML',
     css: 'CSS',
-    scss: 'SCSS',
-    sql: 'SQL',
-    proto: 'Protocol Buffers',
-    elm: 'Elm',
-    clojure: 'Clojure',
-    elixir: 'Elixir',
-    julia: 'Julia',
-    apl: 'APL',
     toml: 'TOML',
+    vue: 'Vue',
+    zig: 'Zig',
+    ocaml: 'OCaml',
+    rescript: 'ReScript',
+    elixir: 'Elixir',
+    elisp: 'Emacs Lisp',
+    solidity: 'Solidity',
+    elm: 'Elm',
+    objc: 'Objective-C',
   };
 
   /**
-   * Maps a file path or extension to its tree-sitter language identifier.
+   * Maps a file path or extension to its tree-sitter language grammar identifier.
    */
   public languageForFile(filePath: string): string | null {
     const ext = path.extname(filePath).toLowerCase();
@@ -124,9 +127,21 @@ export class LanguageRegistry {
       return LanguageRegistry.EXTENSION_MAP[ext];
     }
     const basename = path.basename(filePath).toLowerCase();
-    if (basename === 'dockerfile') return 'dockerfile';
-    if (basename === 'makefile') return 'make';
+    if (basename === 'package.json' || basename === 'tsconfig.json') return 'json';
+    if (basename === 'cargo.toml') return 'toml';
+    if (basename === 'dockerfile') return null;
     return null;
+  }
+
+  /**
+   * Resolves language name, throws LanguageNotFoundError if grammar not supported.
+   */
+  public resolveLanguageOrThrow(language: string): string {
+    const canonical = this.canonicalLanguageName(language);
+    if (!this.isLanguageAvailable(canonical)) {
+      throw new LanguageNotFoundError(language);
+    }
+    return canonical;
   }
 
   /**
@@ -163,7 +178,7 @@ export class LanguageRegistry {
   }
 
   /**
-   * Lists all available language identifiers in the system.
+   * Lists all available language identifiers with verified .wasm files.
    */
   public listAvailableLanguages(): string[] {
     const available = new Set<string>();
@@ -179,12 +194,9 @@ export class LanguageRegistry {
    * Lists all installable/supported languages with human-readable display names.
    */
   public listInstallableLanguages(): InstallableLanguage[] {
-    const seen = new Set<string>();
     const list: InstallableLanguage[] = [];
-
     for (const [id, displayName] of Object.entries(LanguageRegistry.DISPLAY_NAMES)) {
-      if (!seen.has(id)) {
-        seen.add(id);
+      if (this.isLanguageAvailable(id)) {
         list.push({ identifier: id, displayName });
       }
     }
@@ -192,7 +204,7 @@ export class LanguageRegistry {
   }
 
   /**
-   * Checks if a language grammar is available in the WebAssembly pack.
+   * Checks if a language grammar is actually available in the WebAssembly pack.
    */
   public isLanguageAvailable(languageName: string): boolean {
     const canonical = this.canonicalLanguageName(languageName);
@@ -200,7 +212,7 @@ export class LanguageRegistry {
   }
 
   /**
-   * Normalizes aliases (e.g. py -> python, c_sharp -> csharp, js -> javascript).
+   * Normalizes aliases (e.g. py -> python, c_sharp -> csharp, js -> javascript, tsx -> tsx).
    */
   public canonicalLanguageName(language: string): string {
     const normalized = language.toLowerCase().trim();
@@ -211,6 +223,8 @@ export class LanguageRegistry {
     if (normalized === 'c_sharp') return 'csharp';
     if (normalized === 'rb') return 'ruby';
     if (normalized === 'sh') return 'bash';
+    if (normalized === 'jsx') return 'javascript';
+    if (normalized === 'tsx') return 'tsx';
     return normalized;
   }
 }

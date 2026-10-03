@@ -2,7 +2,7 @@ import Parser from 'web-tree-sitter';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { ASTNode } from './types';
+import { ASTNode, SyntaxDiagnostic } from './types';
 
 /**
  * Mapping between internal language names / extensions and tree-sitter-wasms binaries.
@@ -63,6 +63,8 @@ export const LANGUAGE_TO_WASM_MAP: Record<string, string> = {
   elisp: 'tree-sitter-elisp.wasm',
   systemrdl: 'tree-sitter-systemrdl.wasm',
   tlaplus: 'tree-sitter-tlaplus.wasm',
+  elm: 'tree-sitter-elm.wasm',
+  objc: 'tree-sitter-objc.wasm',
 };
 
 // Core languages preloaded on server startup for instantaneous response times
@@ -78,6 +80,10 @@ const CORE_PRELOAD_LANGUAGES = [
   'c',
   'cpp',
   'java',
+  'html',
+  'css',
+  'yaml',
+  'toml',
 ];
 
 let isInitialized = false;
@@ -202,17 +208,75 @@ export function getLoadedLanguageSync(language: string): Parser.Language | null 
 }
 
 /**
- * Recursively converts a web-tree-sitter SyntaxNode into the application's ASTNode format.
+ * Traverses SyntaxNode tree to collect all ERROR and MISSING syntax diagnostics.
  */
-export function syntaxNodeToASTNode(node: Parser.SyntaxNode, fieldName?: string): ASTNode {
-  const children: ASTNode[] = [];
-  const count = node.childCount;
+export function collectSyntaxErrors(rootNode: Parser.SyntaxNode): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
 
-  for (let i = 0; i < count; i++) {
-    const child = node.child(i);
-    if (child) {
-      const childField = node.fieldNameForChild(i) || undefined;
-      children.push(syntaxNodeToASTNode(child, childField));
+  function walk(node: Parser.SyntaxNode) {
+    if (node.type === 'ERROR' || node.isMissing) {
+      diagnostics.push({
+        type: node.type,
+        message: node.isMissing
+          ? `Missing expected syntax token at line ${node.startPosition.row + 1}`
+          : `Syntax error near '${(node.text || '').slice(0, 40)}'`,
+        isMissing: Boolean(node.isMissing),
+        startPosition: {
+          row: node.startPosition.row,
+          column: node.startPosition.column,
+        },
+        endPosition: {
+          row: node.endPosition.row,
+          column: node.endPosition.column,
+        },
+        startByte: node.startIndex,
+        endByte: node.endIndex,
+        text: node.text,
+      });
+    }
+
+    const count = node.childCount;
+    for (let i = 0; i < count; i++) {
+      const child = node.child(i);
+      if (child) {
+        walk(child);
+      }
+    }
+  }
+
+  walk(rootNode);
+  return diagnostics;
+}
+
+/**
+ * Recursively converts a web-tree-sitter SyntaxNode into the application's ASTNode format.
+ * Supports depth bounding and optional text extraction to prevent JSON memory explosion.
+ */
+export function syntaxNodeToASTNode(
+  node: Parser.SyntaxNode,
+  fieldName?: string,
+  options?: { maxDepth?: number; includeText?: boolean; currentDepth?: number }
+): ASTNode {
+  const maxDepth = options?.maxDepth ?? 50;
+  const includeText = options?.includeText ?? true;
+  const currentDepth = options?.currentDepth ?? 0;
+
+  const children: ASTNode[] = [];
+
+  if (currentDepth < maxDepth) {
+    const count = node.childCount;
+    for (let i = 0; i < count; i++) {
+      const child = node.child(i);
+      if (child) {
+        const childField = node.fieldNameForChild(i) || undefined;
+        children.push(
+          syntaxNodeToASTNode(child, childField, {
+            maxDepth,
+            includeText,
+            currentDepth: currentDepth + 1,
+          })
+        );
+      }
     }
   }
 
@@ -221,6 +285,7 @@ export function syntaxNodeToASTNode(node: Parser.SyntaxNode, fieldName?: string)
     type: node.type,
     isNamed: node.isNamed,
     field: fieldName,
+    field_name: fieldName,
     startPoint: {
       row: node.startPosition.row,
       column: node.startPosition.column,
@@ -229,20 +294,46 @@ export function syntaxNodeToASTNode(node: Parser.SyntaxNode, fieldName?: string)
       row: node.endPosition.row,
       column: node.endPosition.column,
     },
+    start_point: {
+      row: node.startPosition.row,
+      column: node.startPosition.column,
+    },
+    end_point: {
+      row: node.endPosition.row,
+      column: node.endPosition.column,
+    },
     startByte: node.startIndex,
     endByte: node.endIndex,
-    text: node.text,
+    start_byte: node.startIndex,
+    end_byte: node.endIndex,
+    text: includeText ? node.text : undefined,
     children,
+    depth: currentDepth,
+    isApproximate: false,
   };
 
-  (astNode as any).isApproximate = false;
+  // Only scan for errors at root level
+  if (currentDepth === 0) {
+    astNode.hasError = Boolean(node.hasError);
+    if (astNode.hasError) {
+      astNode.errors = collectSyntaxErrors(node);
+    } else {
+      astNode.errors = [];
+    }
+  }
+
   return astNode;
 }
 
 /**
- * Parses source code into ASTNode using web-tree-sitter WASM asynchronously.
+ * Parses source code into native Parser.Tree and Language reference.
+ * Supports incremental parsing when oldTree is provided.
  */
-export async function parseWithTreeSitter(source: string, language: string): Promise<ASTNode | null> {
+export async function parseRawTree(
+  source: string,
+  language: string,
+  oldTree?: Parser.Tree | null
+): Promise<{ tree: Parser.Tree; tsLanguage: Parser.Language } | null> {
   const tsLanguage = await getTreeSitterLanguage(language);
   if (!tsLanguage) {
     return null;
@@ -251,23 +342,47 @@ export async function parseWithTreeSitter(source: string, language: string): Pro
   const parser = new Parser();
   parser.setLanguage(tsLanguage);
 
-  let tree: Parser.Tree | null = null;
   try {
-    tree = parser.parse(source);
-    const ast = syntaxNodeToASTNode(tree.rootNode);
+    const tree = oldTree ? parser.parse(source, oldTree) : parser.parse(source);
+    return { tree, tsLanguage };
+  } finally {
+    parser.delete();
+  }
+}
+
+/**
+ * Parses source code into ASTNode using web-tree-sitter WASM asynchronously.
+ */
+export async function parseWithTreeSitter(
+  source: string,
+  language: string,
+  options?: { maxDepth?: number; includeText?: boolean; oldTree?: Parser.Tree | null }
+): Promise<ASTNode | null> {
+  const parsed = await parseRawTree(source, language, options?.oldTree);
+  if (!parsed) {
+    return null;
+  }
+
+  const { tree } = parsed;
+  try {
+    const ast = syntaxNodeToASTNode(tree.rootNode, undefined, {
+      maxDepth: options?.maxDepth,
+      includeText: options?.includeText,
+    });
     return ast;
   } finally {
-    if (tree) {
-      tree.delete();
-    }
-    parser.delete();
+    tree.delete();
   }
 }
 
 /**
  * Parses source code synchronously if the language WASM is already loaded in memory.
  */
-export function parseWithTreeSitterSync(source: string, language: string): ASTNode | null {
+export function parseWithTreeSitterSync(
+  source: string,
+  language: string,
+  options?: { maxDepth?: number; includeText?: boolean; oldTree?: Parser.Tree | null }
+): ASTNode | null {
   const tsLanguage = getLoadedLanguageSync(language);
   if (!tsLanguage) {
     return null;
@@ -278,8 +393,11 @@ export function parseWithTreeSitterSync(source: string, language: string): ASTNo
 
   let tree: Parser.Tree | null = null;
   try {
-    tree = parser.parse(source);
-    const ast = syntaxNodeToASTNode(tree.rootNode);
+    tree = options?.oldTree ? parser.parse(source, options.oldTree) : parser.parse(source);
+    const ast = syntaxNodeToASTNode(tree.rootNode, undefined, {
+      maxDepth: options?.maxDepth,
+      includeText: options?.includeText,
+    });
     return ast;
   } finally {
     if (tree) {

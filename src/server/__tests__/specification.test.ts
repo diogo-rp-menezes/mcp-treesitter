@@ -63,7 +63,7 @@ describe('AST/Tree-sitter Language-Agnostic Specification Compliance', () => {
     it('maps extensions to canonical language identifiers', () => {
       expect(languageRegistry.languageForFile('main.py')).toBe('python');
       expect(languageRegistry.languageForFile('app.ts')).toBe('typescript');
-      expect(languageRegistry.languageForFile('component.tsx')).toBe('typescript');
+      expect(languageRegistry.languageForFile('component.tsx')).toBe('tsx');
       expect(languageRegistry.languageForFile('index.js')).toBe('javascript');
       expect(languageRegistry.languageForFile('lib.rs')).toBe('rust');
       expect(languageRegistry.languageForFile('server.go')).toBe('go');
