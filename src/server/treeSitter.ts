@@ -1,0 +1,290 @@
+import Parser from 'web-tree-sitter';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+import { ASTNode } from './types';
+
+/**
+ * Mapping between internal language names / extensions and tree-sitter-wasms binaries.
+ */
+export const LANGUAGE_TO_WASM_MAP: Record<string, string> = {
+  python: 'tree-sitter-python.wasm',
+  py: 'tree-sitter-python.wasm',
+  javascript: 'tree-sitter-javascript.wasm',
+  js: 'tree-sitter-javascript.wasm',
+  mjs: 'tree-sitter-javascript.wasm',
+  cjs: 'tree-sitter-javascript.wasm',
+  typescript: 'tree-sitter-typescript.wasm',
+  ts: 'tree-sitter-typescript.wasm',
+  mts: 'tree-sitter-typescript.wasm',
+  cts: 'tree-sitter-typescript.wasm',
+  tsx: 'tree-sitter-tsx.wasm',
+  jsx: 'tree-sitter-javascript.wasm',
+  go: 'tree-sitter-go.wasm',
+  rust: 'tree-sitter-rust.wasm',
+  rs: 'tree-sitter-rust.wasm',
+  c: 'tree-sitter-c.wasm',
+  h: 'tree-sitter-c.wasm',
+  cpp: 'tree-sitter-cpp.wasm',
+  cc: 'tree-sitter-cpp.wasm',
+  cxx: 'tree-sitter-cpp.wasm',
+  hpp: 'tree-sitter-cpp.wasm',
+  csharp: 'tree-sitter-c_sharp.wasm',
+  cs: 'tree-sitter-c_sharp.wasm',
+  java: 'tree-sitter-java.wasm',
+  ruby: 'tree-sitter-ruby.wasm',
+  rb: 'tree-sitter-ruby.wasm',
+  php: 'tree-sitter-php.wasm',
+  bash: 'tree-sitter-bash.wasm',
+  sh: 'tree-sitter-bash.wasm',
+  zsh: 'tree-sitter-bash.wasm',
+  json: 'tree-sitter-json.wasm',
+  yaml: 'tree-sitter-yaml.wasm',
+  yml: 'tree-sitter-yaml.wasm',
+  toml: 'tree-sitter-toml.wasm',
+  html: 'tree-sitter-html.wasm',
+  htm: 'tree-sitter-html.wasm',
+  css: 'tree-sitter-css.wasm',
+  scss: 'tree-sitter-css.wasm',
+  less: 'tree-sitter-css.wasm',
+  kotlin: 'tree-sitter-kotlin.wasm',
+  kt: 'tree-sitter-kotlin.wasm',
+  kts: 'tree-sitter-kotlin.wasm',
+  swift: 'tree-sitter-swift.wasm',
+  dart: 'tree-sitter-dart.wasm',
+  lua: 'tree-sitter-lua.wasm',
+  scala: 'tree-sitter-scala.wasm',
+  solidity: 'tree-sitter-solidity.wasm',
+  vue: 'tree-sitter-vue.wasm',
+  zig: 'tree-sitter-zig.wasm',
+  ocaml: 'tree-sitter-ocaml.wasm',
+  rescript: 'tree-sitter-rescript.wasm',
+  elixir: 'tree-sitter-elixir.wasm',
+  elisp: 'tree-sitter-elisp.wasm',
+  systemrdl: 'tree-sitter-systemrdl.wasm',
+  tlaplus: 'tree-sitter-tlaplus.wasm',
+};
+
+// Core languages preloaded on server startup for instantaneous response times
+const CORE_PRELOAD_LANGUAGES = [
+  'python',
+  'javascript',
+  'typescript',
+  'tsx',
+  'go',
+  'rust',
+  'json',
+  'bash',
+  'c',
+  'cpp',
+  'java',
+];
+
+let isInitialized = false;
+let initPromise: Promise<void> | null = null;
+const loadedLanguages = new Map<string, Parser.Language>();
+
+/**
+ * Finds the directory containing tree-sitter-wasms binaries.
+ */
+function getWasmsDirectory(): string {
+  let moduleDir = process.cwd();
+  try {
+    moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    // fallback to process.cwd()
+  }
+
+  const candidates = [
+    path.resolve(process.cwd(), 'node_modules/tree-sitter-wasms/out'),
+    path.resolve(moduleDir, '../../node_modules/tree-sitter-wasms/out'),
+    path.resolve(moduleDir, '../node_modules/tree-sitter-wasms/out'),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return path.resolve(process.cwd(), 'node_modules/tree-sitter-wasms/out');
+}
+
+/**
+ * Initializes the web-tree-sitter runtime and preloads core languages.
+ */
+export async function initTreeSitter(): Promise<void> {
+  if (isInitialized) return;
+  if (initPromise) return initPromise;
+
+  initPromise = (async () => {
+    await Parser.init();
+    const wasmDir = getWasmsDirectory();
+
+    for (const lang of CORE_PRELOAD_LANGUAGES) {
+      const wasmFileName = LANGUAGE_TO_WASM_MAP[lang];
+      if (wasmFileName) {
+        const wasmFilePath = path.join(wasmDir, wasmFileName);
+        if (fs.existsSync(wasmFilePath)) {
+          try {
+            const language = await Parser.Language.load(wasmFilePath);
+            loadedLanguages.set(lang, language);
+            // Also alias common extensions
+            if (lang === 'python') loadedLanguages.set('py', language);
+            if (lang === 'javascript') loadedLanguages.set('js', language);
+            if (lang === 'typescript') loadedLanguages.set('ts', language);
+            if (lang === 'rust') loadedLanguages.set('rs', language);
+          } catch {
+            // continue on individual language preload failure
+          }
+        }
+      }
+    }
+
+    isInitialized = true;
+  })();
+
+  return initPromise;
+}
+
+/**
+ * Checks if a language is supported by tree-sitter-wasms.
+ */
+export function isTreeSitterLanguageSupported(language: string): boolean {
+  const normalized = language.toLowerCase();
+  return Boolean(LANGUAGE_TO_WASM_MAP[normalized]);
+}
+
+/**
+ * Retrieves a cached language or loads it dynamically on demand.
+ */
+export async function getTreeSitterLanguage(language: string): Promise<Parser.Language | null> {
+  const normalized = language.toLowerCase();
+  if (loadedLanguages.has(normalized)) {
+    return loadedLanguages.get(normalized)!;
+  }
+
+  const wasmFileName = LANGUAGE_TO_WASM_MAP[normalized];
+  if (!wasmFileName) {
+    return null;
+  }
+
+  if (!isInitialized) {
+    await initTreeSitter();
+    if (loadedLanguages.has(normalized)) {
+      return loadedLanguages.get(normalized)!;
+    }
+  }
+
+  const wasmDir = getWasmsDirectory();
+  const wasmFilePath = path.join(wasmDir, wasmFileName);
+
+  if (!fs.existsSync(wasmFilePath)) {
+    return null;
+  }
+
+  try {
+    const loaded = await Parser.Language.load(wasmFilePath);
+    loadedLanguages.set(normalized, loaded);
+    return loaded;
+  } catch (err: any) {
+    console.warn(`[Tree-sitter WASM] Failed to load ${wasmFileName}: ${err?.message}`);
+    return null;
+  }
+}
+
+/**
+ * Gets already loaded language synchronously, or null if not yet loaded.
+ */
+export function getLoadedLanguageSync(language: string): Parser.Language | null {
+  const normalized = language.toLowerCase();
+  return loadedLanguages.get(normalized) || null;
+}
+
+/**
+ * Recursively converts a web-tree-sitter SyntaxNode into the application's ASTNode format.
+ */
+export function syntaxNodeToASTNode(node: Parser.SyntaxNode, fieldName?: string): ASTNode {
+  const children: ASTNode[] = [];
+  const count = node.childCount;
+
+  for (let i = 0; i < count; i++) {
+    const child = node.child(i);
+    if (child) {
+      const childField = node.fieldNameForChild(i) || undefined;
+      children.push(syntaxNodeToASTNode(child, childField));
+    }
+  }
+
+  const astNode: ASTNode = {
+    id: `ts_${node.id}`,
+    type: node.type,
+    isNamed: node.isNamed,
+    field: fieldName,
+    startPoint: {
+      row: node.startPosition.row,
+      column: node.startPosition.column,
+    },
+    endPoint: {
+      row: node.endPosition.row,
+      column: node.endPosition.column,
+    },
+    startByte: node.startIndex,
+    endByte: node.endIndex,
+    text: node.text,
+    children,
+  };
+
+  (astNode as any).isApproximate = false;
+  return astNode;
+}
+
+/**
+ * Parses source code into ASTNode using web-tree-sitter WASM asynchronously.
+ */
+export async function parseWithTreeSitter(source: string, language: string): Promise<ASTNode | null> {
+  const tsLanguage = await getTreeSitterLanguage(language);
+  if (!tsLanguage) {
+    return null;
+  }
+
+  const parser = new Parser();
+  parser.setLanguage(tsLanguage);
+
+  let tree: Parser.Tree | null = null;
+  try {
+    tree = parser.parse(source);
+    const ast = syntaxNodeToASTNode(tree.rootNode);
+    return ast;
+  } finally {
+    if (tree) {
+      tree.delete();
+    }
+    parser.delete();
+  }
+}
+
+/**
+ * Parses source code synchronously if the language WASM is already loaded in memory.
+ */
+export function parseWithTreeSitterSync(source: string, language: string): ASTNode | null {
+  const tsLanguage = getLoadedLanguageSync(language);
+  if (!tsLanguage) {
+    return null;
+  }
+
+  const parser = new Parser();
+  parser.setLanguage(tsLanguage);
+
+  let tree: Parser.Tree | null = null;
+  try {
+    tree = parser.parse(source);
+    const ast = syntaxNodeToASTNode(tree.rootNode);
+    return ast;
+  } finally {
+    if (tree) {
+      tree.delete();
+    }
+    parser.delete();
+  }
+}

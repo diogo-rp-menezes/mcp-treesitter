@@ -14,9 +14,13 @@ import {
   Sparkles,
   ExternalLink,
   BarChart2,
+  GitBranch,
+  Grid,
+  ListTree,
 } from 'lucide-react';
 import { ASTNode } from '../types';
 import { ASTD3Chart } from './ASTD3Chart';
+import { ASTD3Visualizer, VisualizerMode } from './ASTD3Visualizer';
 
 interface ASTExplorerViewProps {
   ast: ASTNode | null;
@@ -57,8 +61,9 @@ export function ASTExplorerView({
   const [copiedNode, setCopiedNode] = useState(false);
   const [forceExpand, setForceExpand] = useState<boolean | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [showD3Chart, setShowD3Chart] = useState(true);
+  const [showD3Chart, setShowD3Chart] = useState(false);
   const [selectedTypeFilter, setSelectedTypeFilter] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<VisualizerMode | 'list'>('tree');
 
   const totalASTNodes = useMemo(() => countNodes(ast), [ast]);
 
@@ -168,14 +173,58 @@ export function ASTExplorerView({
     <div className="flex-1 flex flex-col h-full bg-[#0f172a] overflow-hidden">
       {/* View Header with Controls */}
       <div className="h-10 px-3 border-b border-slate-800 bg-[#11192e] flex items-center justify-between text-xs shrink-0 select-none">
-        <div className="flex items-center gap-2">
-          <Layers className="w-4 h-4 text-cyan-400" />
-          <span className="font-semibold text-slate-200">Árvore Sintática Abstrata (AST)</span>
-          {ast && (
-            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-cyan-300 font-mono hidden sm:inline">
-              {totalASTNodes} nós
-            </span>
-          )}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Layers className="w-4 h-4 text-cyan-400" />
+            <span className="font-semibold text-slate-200">Árvore Sintática (AST)</span>
+            {ast && (
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-cyan-300 font-mono hidden sm:inline">
+                {totalASTNodes} nós
+              </span>
+            )}
+          </div>
+
+          {/* View Mode Segmented Controls */}
+          <div className="flex items-center gap-0.5 p-0.5 bg-slate-900 border border-slate-700/80 rounded-lg">
+            <button
+              onClick={() => setViewMode('tree')}
+              className={`px-2 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition ${
+                viewMode === 'tree'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Grafo Hierárquico Interativo com nós e links SVG pelo D3.js"
+            >
+              <GitBranch className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Grafo D3</span>
+            </button>
+
+            <button
+              onClick={() => setViewMode('treemap')}
+              className={`px-2 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition ${
+                viewMode === 'treemap'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Treemap Retangular D3.js ponderado por extensão de código"
+            >
+              <Grid className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Treemap D3</span>
+            </button>
+
+            <button
+              onClick={() => setViewMode('list')}
+              className={`px-2 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition ${
+                viewMode === 'list'
+                  ? 'bg-slate-800 text-cyan-300 border border-slate-600 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Visualização em Lista Indentada"
+            >
+              <ListTree className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Lista</span>
+            </button>
+          </div>
         </div>
 
         <div className="flex items-center gap-2.5">
@@ -210,23 +259,25 @@ export function ASTExplorerView({
             </select>
           </div>
 
-          {/* Expand / Collapse buttons */}
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setForceExpand(true)}
-              className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-slate-200 transition"
-              title="Expandir todos os nós"
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => setForceExpand(false)}
-              className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-slate-200 transition"
-              title="Recolher nós"
-            >
-              <Minimize2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
+          {/* Expand / Collapse buttons for list mode */}
+          {viewMode === 'list' && (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setForceExpand(true)}
+                className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-slate-200 transition"
+                title="Expandir todos os nós"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => setForceExpand(false)}
+                className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-slate-200 transition"
+                title="Recolher nós"
+              >
+                <Minimize2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
 
           {/* D3 Distribution Chart Toggle Button */}
           <button
@@ -236,10 +287,10 @@ export function ASTExplorerView({
                 ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
                 : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-slate-200'
             }`}
-            title="Alternar visualização da distribuição de tipos de nós com D3"
+            title="Alternar gráfico de distribuição de tipos de nós com D3"
           >
             <BarChart2 className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Gráfico D3</span>
+            <span className="hidden sm:inline">Estatísticas</span>
           </button>
 
           {/* EXPORT AST JSON BUTTON */}
@@ -265,20 +316,34 @@ export function ASTExplorerView({
         />
       )}
 
-      {/* Main Split: Tree + Node Detail */}
+      {/* Main Split: Visualizer/Tree + Node Detail */}
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-        {/* Left Side: Interactive AST Tree */}
-        <div className="flex-1 overflow-auto p-3 font-mono text-xs">
+        {/* Left Side: Interactive AST Visualizer or Tree List */}
+        <div className="flex-1 flex flex-col overflow-hidden relative">
           {ast ? (
-            <TreeNode
-              node={ast}
-              depth={0}
-              maxDepth={maxDepth}
-              forceExpand={forceExpand}
-              searchTerm={searchTerm}
-              selectedNode={selectedNode}
-              onSelectNode={onSelectNode}
-            />
+            viewMode === 'list' ? (
+              <div className="flex-1 overflow-auto p-3 font-mono text-xs">
+                <TreeNode
+                  node={ast}
+                  depth={0}
+                  maxDepth={maxDepth}
+                  forceExpand={forceExpand}
+                  searchTerm={searchTerm}
+                  selectedNode={selectedNode}
+                  onSelectNode={onSelectNode}
+                />
+              </div>
+            ) : (
+              <ASTD3Visualizer
+                ast={ast}
+                selectedNode={selectedNode}
+                maxDepth={maxDepth}
+                searchTerm={searchTerm}
+                mode={viewMode}
+                onSelectNode={onSelectNode}
+                onModeChange={(newMode) => setViewMode(newMode)}
+              />
+            )
           ) : (
             <div className="text-slate-500 italic p-6 text-center">
               Nenhuma árvore sintática disponível para este código.

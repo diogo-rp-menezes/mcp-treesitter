@@ -1,7 +1,10 @@
-import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
 import path from 'path';
 import fs from 'fs';
 import { Project, ProjectFile } from './types';
+
+const nodeRequire = createRequire(import.meta.url);
+const { DatabaseSync } = nodeRequire('node:sqlite');
 
 // Ensure data directory exists
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -12,7 +15,7 @@ if (!fs.existsSync(DATA_DIR)) {
 const DB_PATH = path.join(DATA_DIR, 'workspace.db');
 
 export class SQLiteWorkspaceStorage {
-  private db: DatabaseSync;
+  private db: any;
 
   constructor(dbPath: string = DB_PATH) {
     this.db = new DatabaseSync(dbPath);

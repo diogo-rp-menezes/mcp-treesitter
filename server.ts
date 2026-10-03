@@ -4,11 +4,27 @@ import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { projectStore } from './src/server/store';
-import { parseSourceToAST, detectLanguage, extractSymbolsFromAST, findNodeAtPosition } from './src/server/parser';
+import {
+  parseSourceToAST,
+  parseSourceToASTAsync,
+  detectLanguage,
+  extractSymbolsFromAST,
+  findNodeAtPosition,
+} from './src/server/parser';
+import { initTreeSitter } from './src/server/treeSitter';
 import { executeQuery } from './src/server/queryEngine';
 import { calculateComplexity } from './src/server/complexity';
 import { findSimilarCodeBlocks } from './src/server/similarity';
 import { TEMPLATES, COMMON_NODE_DESCRIPTIONS } from './src/server/templates';
+import { languageRegistry } from './src/server/languageRegistry';
+import { treeCache } from './src/server/treeCache';
+import {
+  analyzeProjectStructure,
+  findDependencies,
+  searchText,
+} from './src/server/operations';
+import { adaptQuery, buildCompoundQuery } from './src/server/queryBuilder';
+import { MCPTreeSitterError } from './src/server/errors';
 import { MCP_TOOLS_METADATA, MCP_PROMPTS_METADATA, handleMCPToolCall, handleMCPPrompt } from './src/server/mcp';
 import { ProjectIsolationError } from './src/server/isolation';
 import {
@@ -24,6 +40,13 @@ import { importGitHubRepository, parseGitHubRepo } from './src/server/github';
 import { sqliteStorage } from './src/server/db';
 
 async function startServer() {
+  // Initialize WebAssembly Tree-sitter runtime and preload core language grammars
+  try {
+    await initTreeSitter();
+  } catch (err: any) {
+    console.warn(`[Tree-sitter WASM] Initialization warning: ${err?.message}`);
+  }
+
   const app = express();
   const port = Number(process.env.PORT || 3000);
   const host = '0.0.0.0';
@@ -671,7 +694,7 @@ async function startServer() {
   });
 
   // AST endpoint
-  app.post('/api/ast', (req, res) => {
+  app.post('/api/ast', async (req, res) => {
     try {
       const { code, language, project, path } = req.body;
       let source = code;
@@ -687,7 +710,7 @@ async function startServer() {
       if (!source) source = '';
       if (!lang) lang = 'python';
 
-      const ast = parseSourceToAST(source, lang);
+      const ast = await parseSourceToASTAsync(source, lang);
       res.json(ast);
     } catch (err: any) {
       if (err instanceof ProjectIsolationError) {
@@ -698,14 +721,14 @@ async function startServer() {
   });
 
   // Export AST as downloadable JSON for external tools
-  app.get('/api/projects/:name/ast-export', (req, res) => {
+  app.get('/api/projects/:name/ast-export', async (req, res) => {
     try {
       const filePath = req.query.path as string;
       if (!filePath) return res.status(400).json({ error: 'path query parameter is required' });
       const file = projectStore.getFile(req.params.name, filePath);
       if (!file) return res.status(404).json({ error: 'File not found' });
 
-      const ast = parseSourceToAST(file.content, file.language);
+      const ast = await parseSourceToASTAsync(file.content, file.language);
       const filename = filePath.split('/').pop() || 'file';
       const cleanFilename = `${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}.ast.json`;
 
@@ -726,7 +749,7 @@ async function startServer() {
   });
 
   // Query endpoint
-  app.post('/api/query', (req, res) => {
+  app.post('/api/query', async (req, res) => {
     try {
       const { query, code, language, captureFilter, maxResults, project, path } = req.body;
       if (!query) return res.status(400).json({ error: 'Query is required' });
@@ -741,7 +764,7 @@ async function startServer() {
         lang = f.language;
       }
 
-      const ast = parseSourceToAST(source || '', lang || 'python');
+      const ast = await parseSourceToASTAsync(source || '', lang || 'python');
       const matches = executeQuery(ast, query, {
         captureFilter,
         maxResults: maxResults ? Number(maxResults) : 100,
@@ -756,7 +779,7 @@ async function startServer() {
   });
 
   // Symbols endpoint
-  app.post('/api/symbols', (req, res) => {
+  app.post('/api/symbols', async (req, res) => {
     try {
       const { code, language, project, path } = req.body;
       let source = code;
@@ -769,7 +792,7 @@ async function startServer() {
         lang = f.language;
       }
 
-      const ast = parseSourceToAST(source || '', lang);
+      const ast = await parseSourceToASTAsync(source || '', lang);
       const symbols = extractSymbolsFromAST(ast, lang);
       res.json(symbols);
     } catch (err: any) {
@@ -781,7 +804,7 @@ async function startServer() {
   });
 
   // Complexity endpoint
-  app.post('/api/complexity', (req, res) => {
+  app.post('/api/complexity', async (req, res) => {
     try {
       const { code, language, project, path } = req.body;
       let source = code;
@@ -794,8 +817,8 @@ async function startServer() {
         lang = f.language;
       }
 
-      const ast = parseSourceToAST(source || '', lang);
-      const metrics = calculateComplexity(source || '', ast);
+      const ast = await parseSourceToASTAsync(source || '', lang);
+      const metrics = calculateComplexity(source || '', ast, lang);
       res.json(metrics);
     } catch (err: any) {
       if (err instanceof ProjectIsolationError) {
@@ -806,7 +829,7 @@ async function startServer() {
   });
 
   // Consolidated real-time analysis endpoint to minimize network overhead and avoid throttling
-  app.post('/api/analyze', (req, res) => {
+  app.post('/api/analyze', async (req, res) => {
     try {
       const { code, language, project, path } = req.body;
       let source = code;
@@ -819,9 +842,9 @@ async function startServer() {
         lang = f.language;
       }
 
-      const ast = parseSourceToAST(source || '', lang);
+      const ast = await parseSourceToASTAsync(source || '', lang);
       const symbols = extractSymbolsFromAST(ast, lang);
-      const complexity = calculateComplexity(source || '', ast);
+      const complexity = calculateComplexity(source || '', ast, lang);
 
       res.json({
         ast,
@@ -837,7 +860,7 @@ async function startServer() {
   });
 
   // Node at position
-  app.post('/api/node-at-pos', (req, res) => {
+  app.post('/api/node-at-pos', async (req, res) => {
     try {
       const { code, language, row, column, project, path } = req.body;
       let source = code;
@@ -850,7 +873,7 @@ async function startServer() {
         lang = f.language;
       }
 
-      const ast = parseSourceToAST(source || '', lang);
+      const ast = await parseSourceToASTAsync(source || '', lang);
       const node = findNodeAtPosition(ast, Number(row), Number(column));
       res.json(node || null);
     } catch (err: any) {
@@ -899,9 +922,101 @@ async function startServer() {
   // Languages endpoint
   app.get('/api/languages', (req, res) => {
     res.json({
-      available: Object.keys(TEMPLATES),
+      available: languageRegistry.listAvailableLanguages(),
+      installable: languageRegistry.listInstallableLanguages(),
       descriptions: COMMON_NODE_DESCRIPTIONS,
     });
+  });
+
+  // Project structure endpoint
+  app.get('/api/projects/:name/structure', (req, res) => {
+    try {
+      const proj = projectStore.getProject(req.params.name);
+      if (!proj) return res.status(404).json({ error: 'Project not found' });
+      const analysis = analyzeProjectStructure(proj, languageRegistry, Number(req.query.scan_depth || 3));
+      res.json(analysis);
+    } catch (err: any) {
+      if (err instanceof MCPTreeSitterError) {
+        return res.status(err.statusCode).json(err.toJSON());
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Dependencies endpoint
+  app.get('/api/projects/:name/dependencies', async (req, res) => {
+    try {
+      const filePath = req.query.path as string;
+      if (!filePath) return res.status(400).json({ error: 'path query parameter is required' });
+      const proj = projectStore.getProject(req.params.name);
+      if (!proj) return res.status(404).json({ error: 'Project not found' });
+      const deps = await findDependencies(proj, filePath, languageRegistry);
+      res.json(deps);
+    } catch (err: any) {
+      if (err instanceof MCPTreeSitterError) {
+        return res.status(err.statusCode).json(err.toJSON());
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Text search endpoint
+  app.post('/api/projects/:name/search-text', (req, res) => {
+    try {
+      const { pattern, filePattern, maxResults, caseSensitive, wholeWord, useRegex, contextLines } = req.body;
+      if (!pattern) return res.status(400).json({ error: 'pattern is required' });
+      const proj = projectStore.getProject(req.params.name);
+      if (!proj) return res.status(404).json({ error: 'Project not found' });
+      const results = searchText(
+        proj,
+        pattern,
+        filePattern || '**/*',
+        maxResults ? Number(maxResults) : 100,
+        Boolean(caseSensitive),
+        Boolean(wholeWord),
+        Boolean(useRegex),
+        contextLines ? Number(contextLines) : 0
+      );
+      res.json(results);
+    } catch (err: any) {
+      if (err instanceof MCPTreeSitterError) {
+        return res.status(err.statusCode).json(err.toJSON());
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Query adaptation endpoint
+  app.post('/api/query/adapt', (req, res) => {
+    try {
+      const { query, fromLanguage, toLanguage } = req.body;
+      if (!query || !fromLanguage || !toLanguage) {
+        return res.status(400).json({ error: 'query, fromLanguage and toLanguage are required' });
+      }
+      res.json(adaptQuery(query, fromLanguage, toLanguage));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Compound query endpoint
+  app.post('/api/query/compound', (req, res) => {
+    try {
+      const { language, patterns, combine } = req.body;
+      if (!language || !patterns || !Array.isArray(patterns)) {
+        return res.status(400).json({ error: 'language and patterns array are required' });
+      }
+      res.json({
+        query: buildCompoundQuery(language, patterns, combine || 'or'),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Cache stats endpoint
+  app.get('/api/cache/stats', (req, res) => {
+    res.json(treeCache.getStats());
   });
 
   // Full Model Context Protocol (MCP) JSON-RPC 2.0 Handler

@@ -1,9 +1,33 @@
+/**
+ * Model Context Protocol (MCP) Server Tools & Prompts
+ * Implements MCP Tree-sitter Server specifications
+ */
+
 import { projectStore } from './store';
-import { detectLanguage, extractSymbolsFromAST, findNodeAtPosition, parseSourceToAST } from './parser';
+import {
+  detectLanguage,
+  extractSymbolsFromAST,
+  findNodeAtPosition as findNodeAtPos,
+  parseSourceToASTAsync,
+} from './parser';
 import { executeQuery } from './queryEngine';
 import { calculateComplexity } from './complexity';
 import { findSimilarCodeBlocks } from './similarity';
 import { COMMON_NODE_DESCRIPTIONS, TEMPLATES } from './templates';
+import { languageRegistry } from './languageRegistry';
+import { treeCache } from './treeCache';
+import {
+  extractSymbols,
+  analyzeProjectStructure,
+  findDependencies,
+  analyzeCodeComplexity,
+  searchText,
+  findSimilarCode,
+  getFileAST,
+  findNodeAtPosition,
+} from './operations';
+import { adaptQuery, buildCompoundQuery, getTemplate, describeNodeTypes } from './queryBuilder';
+import { serverConfig } from './config';
 
 export const MCP_TOOLS_METADATA = [
   {
@@ -17,6 +41,7 @@ export const MCP_TOOLS_METADATA = [
         code: { type: 'string', description: 'Optional raw code snippet' },
         language: { type: 'string', description: 'Language if providing raw code' },
         max_depth: { type: 'number', description: 'Max depth of AST' },
+        include_text: { type: 'boolean', description: 'Whether to include node text' },
       },
     },
   },
@@ -32,13 +57,14 @@ export const MCP_TOOLS_METADATA = [
         code: { type: 'string', description: 'Optional raw code string' },
         language: { type: 'string', description: 'Language' },
         capture_filter: { type: 'string', description: 'Optional capture name to filter' },
+        max_results: { type: 'number', description: 'Max matches to return' },
       },
       required: ['query'],
     },
   },
   {
     name: 'get_symbols',
-    description: 'Extract symbols (functions, classes, imports) from a file or code.',
+    description: 'Extract symbols (functions, classes, structs, imports) from a file or code.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -46,12 +72,14 @@ export const MCP_TOOLS_METADATA = [
         file_path: { type: 'string', description: 'Path to file' },
         code: { type: 'string', description: 'Raw code snippet' },
         language: { type: 'string', description: 'Language' },
+        symbol_types: { type: 'array', items: { type: 'string' }, description: 'Types of symbols to extract' },
+        exclude_class_methods: { type: 'boolean', description: 'Exclude methods inside classes from functions' },
       },
     },
   },
   {
     name: 'analyze_complexity',
-    description: 'Analyze code complexity, lines of code, and cyclomatic complexity.',
+    description: 'Analyze code complexity, lines of code, and McCabe cyclomatic complexity.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -63,6 +91,74 @@ export const MCP_TOOLS_METADATA = [
     },
   },
   {
+    name: 'analyze_project_structure',
+    description: 'Analyze complete project structure, languages, entry points, and build files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name' },
+        scan_depth: { type: 'number', description: 'Depth for scanning' },
+      },
+      required: ['project'],
+    },
+  },
+  {
+    name: 'find_dependencies',
+    description: 'Analyze import dependencies, requires, includes, and uses in a file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name' },
+        file_path: { type: 'string', description: 'File path' },
+      },
+      required: ['project', 'file_path'],
+    },
+  },
+  {
+    name: 'search_text',
+    description: 'Search for text or regex patterns across project files with context lines.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name' },
+        pattern: { type: 'string', description: 'Search pattern or regular expression' },
+        file_pattern: { type: 'string', description: 'Glob pattern' },
+        max_results: { type: 'number', description: 'Max results limit' },
+        case_sensitive: { type: 'boolean', description: 'Case sensitive matching' },
+        whole_word: { type: 'boolean', description: 'Match whole words only' },
+        use_regex: { type: 'boolean', description: 'Interpret pattern as regular expression' },
+        context_lines: { type: 'number', description: 'Surrounding context lines to include' },
+      },
+      required: ['project', 'pattern'],
+    },
+  },
+  {
+    name: 'adapt_query',
+    description: 'Adapt a tree-sitter S-expression query from one language grammar to another.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Original query string' },
+        from_language: { type: 'string', description: 'Source language' },
+        to_language: { type: 'string', description: 'Target language' },
+      },
+      required: ['query', 'from_language', 'to_language'],
+    },
+  },
+  {
+    name: 'build_compound_query',
+    description: 'Combine multiple query templates or patterns with OR or AND semantics.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        language: { type: 'string', description: 'Language' },
+        patterns: { type: 'array', items: { type: 'string' }, description: 'Template names or patterns' },
+        combine: { type: 'string', enum: ['or', 'and'], description: 'Combination mode' },
+      },
+      required: ['language', 'patterns'],
+    },
+  },
+  {
     name: 'get_node_at_position',
     description: 'Find AST node at row and column coordinate.',
     inputSchema: {
@@ -70,6 +166,8 @@ export const MCP_TOOLS_METADATA = [
       properties: {
         project: { type: 'string', description: 'Project name' },
         path: { type: 'string', description: 'File path' },
+        code: { type: 'string', description: 'Raw code snippet' },
+        language: { type: 'string', description: 'Language' },
         row: { type: 'number', description: '0-based row' },
         column: { type: 'number', description: '0-based column' },
       },
@@ -86,6 +184,7 @@ export const MCP_TOOLS_METADATA = [
         snippet: { type: 'string', description: 'Snippet to compare' },
         language: { type: 'string', description: 'Language' },
         threshold: { type: 'number', description: 'Minimum similarity (0.0 - 1.0)' },
+        max_results: { type: 'number', description: 'Max results' },
       },
       required: ['snippet'],
     },
@@ -187,6 +286,11 @@ export const MCP_TOOLS_METADATA = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'get_cache_stats',
+    description: 'Get tree cache statistics including size and entries count.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'configure',
     description: 'Update server configuration such as caching, file limits, or log level.',
     inputSchema: {
@@ -225,6 +329,7 @@ export function getCachedAST(cacheKey: string, computeFn: () => any) {
 export function clearASTCache(): number {
   const count = astCache.size;
   astCache.clear();
+  treeCache.invalidate();
   return count;
 }
 
@@ -270,8 +375,8 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
   switch (name) {
     case 'list_languages': {
       return {
-        available: Object.keys(TEMPLATES),
-        installable: [],
+        available: languageRegistry.listAvailableLanguages(),
+        installable: languageRegistry.listInstallableLanguages(),
       };
     }
 
@@ -310,6 +415,21 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
     }
 
     case 'get_ast': {
+      if (args.project && args.path) {
+        const proj = projectStore.getProject(args.project);
+        if (proj) {
+          const res = await getFileAST(
+            proj,
+            args.path,
+            languageRegistry,
+            treeCache,
+            args.max_depth || 5,
+            args.include_text !== false
+          );
+          return res.tree;
+        }
+      }
+
       let code = args.code;
       let lang = args.language || 'python';
 
@@ -321,7 +441,7 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
       }
 
       if (!code) throw new Error('Either code or project + path must be provided');
-      return parseSourceToAST(code, lang);
+      return await parseSourceToASTAsync(code, lang);
     }
 
     case 'get_node_at_position': {
@@ -336,7 +456,7 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
       }
 
       if (!code) throw new Error('Code or project + path required');
-      const ast = parseSourceToAST(code, lang);
+      const ast = await parseSourceToASTAsync(code, lang);
       const node = findNodeAtPosition(ast, Number(args.row), Number(args.column));
       return node || { error: 'No node found at specified position' };
     }
@@ -354,14 +474,29 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
       }
 
       if (!code) throw new Error('Code or file_path required');
-      const ast = parseSourceToAST(code, lang);
+      const ast = await parseSourceToASTAsync(code, lang);
       const matches = executeQuery(ast, args.query, {
         captureFilter: args.capture_filter,
+        maxResults: args.max_results ? Number(args.max_results) : 100,
       });
       return matches;
     }
 
     case 'get_symbols': {
+      if (args.project && (args.file_path || args.path)) {
+        const filePath = args.file_path || args.path;
+        const proj = projectStore.getProject(args.project);
+        if (proj) {
+          return await extractSymbols(
+            proj,
+            filePath,
+            languageRegistry,
+            args.symbol_types,
+            args.exclude_class_methods
+          );
+        }
+      }
+
       let code = args.code;
       let lang = args.language || 'python';
 
@@ -374,11 +509,19 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
       }
 
       if (!code) throw new Error('Code or file_path required');
-      const ast = parseSourceToAST(code, lang);
+      const ast = await parseSourceToASTAsync(code, lang);
       return extractSymbolsFromAST(ast, lang);
     }
 
     case 'analyze_complexity': {
+      if (args.project && (args.file_path || args.path)) {
+        const filePath = args.file_path || args.path;
+        const proj = projectStore.getProject(args.project);
+        if (proj) {
+          return await analyzeCodeComplexity(proj, filePath, languageRegistry);
+        }
+      }
+
       let code = args.code;
       let lang = args.language || 'python';
 
@@ -391,12 +534,61 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
       }
 
       if (!code) throw new Error('Code or file_path required');
-      const ast = parseSourceToAST(code, lang);
-      return calculateComplexity(code, ast);
+      const ast = await parseSourceToASTAsync(code, lang);
+      return calculateComplexity(code, ast, lang);
+    }
+
+    case 'analyze_project_structure': {
+      const proj = projectStore.getProject(args.project);
+      if (!proj) throw new Error(`Project '${args.project}' not found`);
+      return analyzeProjectStructure(proj, languageRegistry, args.scan_depth || 3);
+    }
+
+    case 'find_dependencies': {
+      const proj = projectStore.getProject(args.project);
+      if (!proj) throw new Error(`Project '${args.project}' not found`);
+      return await findDependencies(proj, args.file_path || args.path, languageRegistry);
+    }
+
+    case 'search_text': {
+      const proj = projectStore.getProject(args.project);
+      if (!proj) throw new Error(`Project '${args.project}' not found`);
+      return searchText(
+        proj,
+        args.pattern,
+        args.file_pattern || '**/*',
+        args.max_results ? Number(args.max_results) : 100,
+        args.case_sensitive === true,
+        args.whole_word === true,
+        args.use_regex === true,
+        args.context_lines ? Number(args.context_lines) : 0
+      );
+    }
+
+    case 'adapt_query': {
+      return adaptQuery(args.query, args.from_language, args.to_language);
+    }
+
+    case 'build_compound_query': {
+      return {
+        query: buildCompoundQuery(args.language, args.patterns, args.combine || 'or'),
+      };
     }
 
     case 'find_similar_code': {
       const proj = projectStore.getProject(args.project || 'tree-sitter-core');
+      if (proj) {
+        return await findSimilarCode(
+          proj,
+          args.snippet,
+          languageRegistry,
+          treeCache,
+          args.language || 'python',
+          args.threshold || 0.5,
+          args.max_results || 10
+        );
+      }
+
       const candidates = proj
         ? Array.from(proj.files.values()).map((f) => ({
             path: f.path,
@@ -415,8 +607,7 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
     }
 
     case 'get_query_template_tool': {
-      const t = TEMPLATES[args.language]?.[args.template_name];
-      if (!t) throw new Error(`Template ${args.template_name} not found for ${args.language}`);
+      const t = getTemplate(args.language, args.template_name);
       return {
         language: args.language,
         name: args.template_name,
@@ -436,28 +627,38 @@ export async function handleMCPToolCall(name: string, args: Record<string, any>)
     }
 
     case 'get_node_types': {
-      return COMMON_NODE_DESCRIPTIONS[args.language] || {};
+      return describeNodeTypes(args.language);
     }
 
     case 'clear_cache': {
       const clearedCount = clearASTCache();
-      return { status: 'success', message: `Parse tree caches successfully cleared (${clearedCount} cached entries removed)` };
+      return {
+        status: 'success',
+        message: `Parse tree caches successfully cleared (${clearedCount} cached entries removed)`,
+      };
+    }
+
+    case 'get_cache_stats': {
+      return treeCache.getStats();
     }
 
     case 'configure': {
       if (typeof args.cache_enabled === 'boolean') {
         mcpConfig.cacheEnabled = args.cache_enabled;
+        treeCache.setEnabled(args.cache_enabled);
       }
       if (typeof args.max_file_size_mb === 'number') {
         mcpConfig.maxFileSizeMb = args.max_file_size_mb;
+        serverConfig.updateValue('security.max_file_size_mb', args.max_file_size_mb);
       }
       if (typeof args.log_level === 'string') {
         mcpConfig.logLevel = args.log_level;
+        serverConfig.updateValue('log_level', args.log_level);
       }
       return {
-        cache: { enabled: mcpConfig.cacheEnabled, max_size_mb: 100 },
-        security: { max_file_size_mb: mcpConfig.maxFileSizeMb },
-        log_level: mcpConfig.logLevel,
+        cache: treeCache.getStats(),
+        security: serverConfig.getConfig().security,
+        log_level: serverConfig.getConfig().log_level,
       };
     }
 

@@ -131,34 +131,40 @@ describe('Workspace Roots - validateScanDirectoryPath (com filesystem real)', ()
 
   test('absoluto fora das roots retorna 403 sem vazar a root', () => {
     const result = validateScanDirectoryPath(os.tmpdir(), config);
-    assert(!result.ok && result.status === 403, 'esperado 403');
-    assert(!result.ok && !result.error.includes(root), 'mensagem 403 nao deve vazar a root');
+    assert(!result.ok, 'esperado ok: false');
+    assert((result as any).status === 403, 'esperado 403');
+    assert(!(result as any).error.includes(root), 'mensagem 403 nao deve vazar a root');
   });
 
   test('.. escapando da root retorna 403', () => {
     const result = validateScanDirectoryPath(path.join(root, '..', 'elsewhere'), config);
-    assert(!result.ok && result.status === 403, 'esperado 403');
+    assert(!result.ok, 'esperado ok: false');
+    assert((result as any).status === 403, 'esperado 403');
   });
 
   test('inexistente dentro da root retorna 404 (ecoando apenas o path do cliente)', () => {
     const result = validateScanDirectoryPath(path.join(root, 'missing'), config);
-    assert(!result.ok && result.status === 404, 'esperado 404');
+    assert(!result.ok, 'esperado ok: false');
+    assert((result as any).status === 404, 'esperado 404');
   });
 
   test('arquivo (nao diretorio) retorna 400', () => {
     const result = validateScanDirectoryPath(path.join(root, 'notes.txt'), config);
-    assert(!result.ok && result.status === 400, 'esperado 400');
+    assert(!result.ok, 'esperado ok: false');
+    assert((result as any).status === 400, 'esperado 400');
   });
 
   test('null byte retorna 400', () => {
     const result = validateScanDirectoryPath('dir\0name', config);
-    assert(!result.ok && result.status === 400, 'esperado 400');
+    assert(!result.ok, 'esperado ok: false');
+    assert((result as any).status === 400, 'esperado 400');
   });
 
   test('ausente / vazio / tipo errado retornam 400', () => {
     for (const bad of [undefined, '', 123, {}, null]) {
       const result = validateScanDirectoryPath(bad, config);
-      assert(!result.ok && result.status === 400, `esperado 400 para ${JSON.stringify(bad)}`);
+      assert(!result.ok, 'esperado ok: false');
+      assert((result as any).status === 400, `esperado 400 para ${JSON.stringify(bad)}`);
     }
   });
 
@@ -169,7 +175,8 @@ describe('Workspace Roots - validateScanDirectoryPath (com filesystem real)', ()
       const okResult = validateScanDirectoryPath('proj', config);
       assert(okResult.ok, 'relativo dentro da root deveria passar');
       const escape = validateScanDirectoryPath('..', config);
-      assert(!escape.ok && escape.status === 403, 'relativo .. deveria dar 403');
+      assert(!escape.ok, 'relativo .. deveria dar erro');
+      assert((escape as any).status === 403, 'relativo .. deveria dar 403');
     } finally {
       process.chdir(previousCwd);
     }
@@ -195,12 +202,14 @@ describe('Workspace Roots - validateScanDirectoryPath (com filesystem real)', ()
   if (symlinkAvailable) {
     test('symlink dentro da root apontando para fora retorna 403', () => {
       const result = validateScanDirectoryPath(path.join(root, 'escape-link'), config);
-      assert(!result.ok && result.status === 403, 'esperado 403 para symlink escape');
+      assert(!result.ok, 'esperado ok: false');
+      assert((result as any).status === 403, 'esperado 403 para symlink escape');
     });
     test('mensagem 403 de symlink nao vaza caminhos internos', () => {
       const result = validateScanDirectoryPath(path.join(root, 'escape-link'), config);
+      assert(!result.ok, 'esperado ok: false');
       assert(
-        !result.ok && !result.error.includes(outside) && !result.error.includes(root),
+        !(result as any).error.includes(outside) && !(result as any).error.includes(root),
         'sem vazamento de caminhos'
       );
     });
