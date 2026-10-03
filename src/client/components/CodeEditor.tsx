@@ -11,8 +11,10 @@ import {
   Variable,
   Layers,
   Key,
+  Columns,
 } from 'lucide-react';
 import { ASTNode, SymbolItem } from '../types';
+import { CodeMiniMap } from './CodeMiniMap';
 
 export interface AutocompleteItem {
   label: string;
@@ -85,6 +87,7 @@ export function CodeEditor({
 }: CodeEditorProps) {
   const [copied, setCopied] = useState(false);
   const [autocompleteEnabled, setAutocompleteEnabled] = useState(true);
+  const [showMiniMap, setShowMiniMap] = useState(true);
 
   // Autocomplete UI state
   const [suggestions, setSuggestions] = useState<AutocompleteItem[]>([]);
@@ -383,6 +386,19 @@ export function CodeEditor({
           )}
 
           <button
+            onClick={() => setShowMiniMap((prev) => !prev)}
+            className={`px-2 py-1 border rounded text-[11px] flex items-center gap-1 transition ${
+              showMiniMap
+                ? 'bg-cyan-950/80 border-cyan-700/80 text-cyan-300'
+                : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-400'
+            }`}
+            title="Alternar mini-mapa do código"
+          >
+            <Columns className="w-3 h-3" />
+            <span>Mini-mapa</span>
+          </button>
+
+          <button
             onClick={handleCopy}
             className="px-2 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded text-slate-300 text-[11px] flex items-center gap-1 transition"
             title="Copiar código para a área de transferência"
@@ -512,6 +528,15 @@ export function CodeEditor({
             </div>
           )}
         </div>
+
+        {/* Code Mini-Map */}
+        {showMiniMap && (
+          <CodeMiniMap
+            code={code}
+            textareaRef={textareaRef}
+            selectedNode={selectedNode}
+          />
+        )}
       </div>
 
       {/* Bottom Status Bar */}

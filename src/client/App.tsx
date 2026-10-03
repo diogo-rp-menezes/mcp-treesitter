@@ -9,6 +9,7 @@ import { ComplexityView } from './components/ComplexityView';
 import { SimilarityView } from './components/SimilarityView';
 import { MCPConsoleView } from './components/MCPConsoleView';
 import { ProjectManagerView } from './components/ProjectManagerView';
+import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { MCPConnectModal } from './components/MCPConnectModal';
 import { Toast } from './components/Toast';
 import {
@@ -97,14 +98,19 @@ export default function App() {
     }
   }, [activeProject, activeFile]);
 
-  // Real-time analysis whenever code or language changes
+  // Real-time analysis whenever code or language changes with AbortController
   useEffect(() => {
-    if (code) {
-      const timer = setTimeout(() => {
-        analyzeCode(code, language);
-      }, 150);
-      return () => clearTimeout(timer);
-    }
+    if (!code) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      analyzeCode(code, language, controller.signal);
+    }, 150);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [code, language]);
 
   async function fetchProjects() {
@@ -178,14 +184,16 @@ export default function App() {
     }
   }
 
-  async function analyzeCode(src: string, lang: string) {
+  async function analyzeCode(src: string, lang: string, signal?: AbortSignal) {
     try {
       // 1. AST
       const astRes = await fetch('/api/ast', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: src, language: lang }),
+        signal,
       });
+      if (signal?.aborted) return;
       const astData = await astRes.json();
       setAst(astData);
 
@@ -194,7 +202,9 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: src, language: lang }),
+        signal,
       });
+      if (signal?.aborted) return;
       const symData = await symRes.json();
       setSymbols(symData);
 
@@ -203,10 +213,16 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: src, language: lang }),
+        signal,
       });
+      if (signal?.aborted) return;
       const compData = await compRes.json();
       setComplexity(compData);
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === 'AbortError' || signal?.aborted) {
+        // Request intentionally aborted by newer keystroke
+        return;
+      }
       console.error('Analysis error:', err);
     }
   }
@@ -332,6 +348,20 @@ export default function App() {
         onSaveFile={handleSaveCurrentFile}
         onLoadPreset={handleLoadPreset}
         onOpenMCPModal={() => setIsMCPModalOpen(true)}
+      />
+
+      {/* Breadcrumb Navigation Bar */}
+      <BreadcrumbBar
+        activeProject={activeProject}
+        activeFile={activeFile}
+        projectPath={projects.find((p) => p.name === activeProject)?.path}
+        projectFiles={projectFiles}
+        language={language}
+        projects={projects}
+        onSelectProject={setActiveProject}
+        onSelectFile={setActiveFile}
+        onOpenProjectManager={() => setActiveTab('projects')}
+        onToast={showToast}
       />
 
       {/* Main Workspace Frame */}

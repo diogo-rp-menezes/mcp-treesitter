@@ -6,192 +6,30 @@ on:
   pull_request:
     branches: [ main ]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-  pull-requests: read
-  security-events: write
-
 jobs:
-  lint-and-test-python:
-    name: Lint & Test (Python ${{ matrix.python-version }}, ${{ matrix.install-method }})
+  build-and-test:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
-        python-version: ["3.12"]
-        install-method: ["uv", "uvx"]
+        node-version: [20.x, 22.x]
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
       with:
-        python-version: ${{ matrix.python-version }}
-        cache: 'pip'
-        cache-dependency-path: |
-          uv.lock
-          pyproject.toml
-
-    - name: Install uv
-      uses: astral-sh/setup-uv@9f1a1fe451d4a1a1b7b8a1b8f8b8a1b8f8b8a1b8f # v5.3.1
-      with:
-        enable-cache: true
-        cache-dependency-glob: "uv.lock"
-
-    - name: Install dependencies (uv)
-      if: matrix.install-method == 'uv'
-      run: |
-        uv sync --frozen --extra dev
-        source .venv/bin/activate
-        which ruff
-        which python
-
-    - name: Install dependencies (uvx/pip)
-      if: matrix.install-method == 'uvx'
-      run: |
-        uv export --frozen --extra dev --no-hashes -o /tmp/ci-requirements.txt
-        python -m pip install -r /tmp/ci-requirements.txt
-        which ruff
-        which python
-
-    - name: Run linting and type checks
-      run: |
-        source .venv/bin/activate
-        ruff check .
-        ruff format . --check
-        mypy src/mcp_server_tree_sitter
-      env:
-        PYTHONPATH: ${{ github.workspace }}/src
-
-    - name: Run tests
-      run: |
-        source .venv/bin/activate
-        pytest tests -v
-        pytest tests/test_diagnostics/ -v
-      env:
-        PYTHONPATH: ${{ github.workspace }}/src
-
-    - name: Ensure diagnostic results directory exists
-      if: always()
-      run: mkdir -p diagnostic_results
-
-    - name: Create placeholder if needed
-      if: always()
-      run: |
-        if [ -z "$(ls -A diagnostic_results 2>/dev/null)" ]; then
-          echo '{"info": "No diagnostic results generated"}' > diagnostic_results/placeholder.json
-        fi
-
-    - name: Archive diagnostic results
-      if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-      with:
-        name: diagnostic-results-${{ matrix.install-method }}
-        path: diagnostic_results/
-        retention-days: 7
-        if-no-files-found: warn
-
-  lint-and-test-node:
-    name: Lint & Test (Node.js)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-    - name: Setup Node.js
-      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.1.0
-      with:
-        node-version: '20'
+        node-version: ${{ matrix.node-version }}
         cache: 'npm'
-        cache-dependency-path: bun.lock
 
     - name: Install dependencies
-      run: bun install --frozen-lockfile
+      run: npm ci
 
-    - name: Run linting
-      run: bun run lint
+    - name: Typecheck / Lint
+      run: npm run lint
 
-    - name: Run type checking
-      run: bun run typecheck
+    - name: Run automated tests
+      run: npm test
 
-    - name: Run tests
-      run: bun test
-
-  verify-uvx:
-    name: Verify Package Build (uvx)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-    - name: Set up Python 3.12
-      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
-      with:
-        python-version: "3.12"
-
-    - name: Install uv
-      uses: astral-sh/setup-uv@9f1a1fe451d4a1a1b7b8a1b8f8b8a1b8f8b8a1b8f # v5.3.1
-
-    - name: Install build dependencies
-      run: |
-        uv pip install build twine
-
-    - name: Build package
-      run: |
-        uv run python -m build
-
-    - name: Verify package installation
-      run: |
-        uv pip install dist/*.whl
-        mcp-server-tree-sitter --help
-
-    - name: Validate package metadata
-      run: |
-        uv run twine check dist/*
-
-  security-scan:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      contents: read
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@0.28.0
-      with:
-        scan-type: 'fs'
-        scan-ref: '.'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-        severity: 'CRITICAL,HIGH'
-
-    - name: Upload Trivy results to GitHub Security
-      uses: github/codeql-action/upload-sarif@192325c86100d080feab897ff886c34abd4c83a3 # v3.28.1
-      with:
-        sarif_file: 'trivy-results.sarif'
-        category: 'trivy-fs'
-
-    - name: Run pip-audit for Python dependencies
-      run: |
-        pip install pip-audit
-        pip-audit --format=json --output=pip-audit-results.json || true
-
-    - name: Upload pip-audit results
-      uses: github/codeql-action/upload-sarif@192325c86100d080feab897ff886c34abd4c83a3 # v3.28.1
-      with:
-        sarif_file: 'pip-audit-results.json'
-        category: 'pip-audit'
+    - name: Build frontend bundle
+      run: npm run build

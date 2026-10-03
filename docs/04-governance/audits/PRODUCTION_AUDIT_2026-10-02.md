@@ -1,265 +1,184 @@
-# Production Readiness Audit Report
+# Relatório de Auditoria de Prontidão para Produção (Full-Spectrum Production Readiness Audit)
 
-**Project:** MCP Tree-sitter Server  
-**Date:** 2026-10-02  
-**Auditor:** Production Code Audit Mode  
-**Scope:** Full-spectrum audit across architecture, security, performance, code quality, testing, and production readiness
-
----
-
-## Executive Summary
-
-The MCP Tree-sitter Server is a TypeScript/Node.js-based Model Context Protocol server providing code analysis capabilities via tree-sitter. The codebase demonstrates solid architectural foundations with proper project isolation, AST parsing for multiple languages, and a comprehensive MCP tool surface. However, several critical and high-severity findings must be addressed before production deployment.
-
-**Overall Risk Rating:** **HIGH** — Multiple security and operational gaps require remediation.
+**Projeto:** MCP Tree-sitter Server / Studio  
+**Data da Auditoria:** 2026-10-02  
+**Auditor:** Roo Code — Production Readiness Auditor  
+**Escopo:** Arquitetura, Segurança (OWASP Top 10), Performance, Qualidade de Código, Cobertura de Testes e Infraestrutura de Produção  
+**Status Geral:** **REPROVADO PARA PRODUÇÃO (CRITICAL BLOCKED)**
 
 ---
 
-## Findings by Category
+## 1. Sumário Executivo
 
-### 🔴 CRITICAL
+A auditoria de prontidão para produção identificou **18 vulnerabilidades e fragilidades críticas**, categorizadas em 6 dimensões. A aplicação apresenta risco operacional e de segurança inaceitável para implantação em ambiente corporativo ou público no estado atual.
 
-#### SEC-01: Command Injection via `execSync` in Git Operations
-**Location:** [`src/server/git.ts:56-57`](src/server/git.ts:56), [`src/server/git.ts:79-81`](src/server/git.ts:79), [`src/server/git.ts:96-98`](src/server/git.ts:96), [`src/server/git.ts:123-125`](src/server/git.ts:123), [`src/server/git.ts:146-148`](src/server/git.ts:146), [`src/server/git.ts:197-199`](src/server/git.ts:197)  
-**Impact:** Arbitrary command execution if `projectPath` is attacker-controlled  
-**Evidence:** `execSync('git rev-parse --is-inside-work-tree', { cwd: targetPath })` and similar calls use unsanitized `targetPath` derived from user input via `projectStore.getProject().path`  
-**Remediation:** Use a proper Git library (e.g., `isomorphic-git` or `simple-git`) instead of shelling out; if `execSync` must remain, validate `targetPath` against an allowlist of known project roots
-
-#### SEC-02: No Authentication/Authorization on MCP Endpoints
-**Location:** [`server.ts:502-630`](server.ts:502) — entire `/api/mcp` handler  
-**Impact:** Any network caller can invoke all 15 MCP tools, read/write project files, execute queries, scan directories  
-**Evidence:** No auth middleware, no token validation, no role-based access control on JSON-RPC methods  
-**Remediation:** Implement MCP-compatible auth (Bearer tokens, mTLS, or OAuth2); add middleware to validate credentials before tool execution
-
-#### SEC-03: Path Traversal in `/api/scan-directory`
-**Location:** [`server.ts:108-227`](server.ts:108)  
-**Impact:** Directory traversal to arbitrary filesystem locations via `dirPath` parameter  
-**Evidence:** `path.resolve(dirPath)` with only `fs.existsSync` check; no validation that path is within allowed roots  
-**Remediation:** Restrict scanning to configured workspace roots; validate `dirPath` against allowlist; reject absolute paths outside workspace
+### Principais Fatores de Bloqueio:
+1. **Segurança Crítica:** Leitura arbitrária do sistema de arquivos do host via [`server.ts:108-225`](server.ts:108) (`POST /api/scan-directory`), execução de comandos do sistema sem sanitização em [`src/server/git.ts:197`](src/server/git.ts:197), ausência total de autenticação/autorização em todas as rotas da API e CORS irrestrito em [`server.ts:21`](server.ts:21).
+2. **Cobertura de Testes:** **0% de cobertura real**. Não existem testes unitários, testes de integração ou suíte de teste configurada no [`package.json:6-11`](package.json:6).
+3. **Pipeline de CI/CD Desconectado:** Os fluxos em [`.github/workflows/ci.yml:1-60`](.github/workflows/ci.yml:1) e [`.github/workflows/release.yml:1-60`](.github/workflows/release.yml:1) executam ferramentas Python (`uv`, `pytest`, `ruff`, `mypy`) direcionadas a um repositório Python legado/inexistente, falhando em 100% das execuções para a base TypeScript/Node.js atual.
+4. **Performance & Resiliência:** Bloqueio síncrono do Event Loop do Node.js por parsing de código na thread principal em [`server.ts:300`](server.ts:300), armazenamento em memória não paginado em [`src/server/store.ts:6`](src/server/store.ts:6) sujeito a OOM (*Out of Memory*), e reexecuções redundantes de parsing síncrono em cada requisição de agregação em [`src/server/store.ts:266`](src/server/store.ts:266).
 
 ---
 
-### 🟠 HIGH
+## 2. Matriz de Priorização de Riscos (Impacto x Probabilidade)
 
-#### SEC-04: CORS Misconfiguration — Wildcard Origin
-**Location:** [`server.ts:21`](server.ts:21)  
-**Impact:** Any website can make authenticated requests to the MCP server  
-**Evidence:** `app.use(cors())` with no origin restrictions  
-**Remediation:** Configure CORS with explicit allowed origins; disable credentials for wildcard
-
-#### SEC-05: Missing Input Validation on MCP Tool Arguments
-**Location:** [`src/server/mcp.ts:200-395`](src/server/mcp.ts:200) — `handleMCPToolCall`  
-**Impact:** Malformed arguments can cause crashes or unexpected behavior  
-**Evidence:** Direct destructuring of `args` without schema validation (e.g., `args.project`, `args.path`, `args.query`)  
-**Remediation:** Add Zod/Joi schemas for each tool's `inputSchema`; validate at MCP entry point
-
-#### SEC-06: No Rate Limiting on Public Endpoints
-**Location:** [`server.ts:16-670`](server.ts:16) — entire Express app  
-**Impact:** DoS via unbounded request volume; resource exhaustion on `/api/scan-directory`, `/api/mcp`  
-**Evidence:** No `express-rate-limit` or similar middleware  
-**Remediation:** Add rate limiting per IP/project; stricter limits on expensive operations
-
-#### ARCH-01: God Class — `server.ts` (677 lines)
-**Location:** [`server.ts`](server.ts:1)  
-**Impact:** Single file handles HTTP routing, MCP protocol, project management, file ops, AST, queries, complexity, similarity, Git, SSE — violates Single Responsibility Principle  
-**Evidence:** 30+ route handlers in one file; tight coupling between HTTP layer and business logic  
-**Remediation:** Extract route modules (`projects.routes.ts`, `mcp.routes.ts`, `analysis.routes.ts`); use dependency injection for services
-
-#### ARCH-02: Singleton Global State — `projectStore`
-**Location:** [`src/server/store.ts:6`](src/server/store.ts:6), [`src/server/store.ts:225`](src/server/store.ts:225)  
-**Impact:** Shared mutable state across requests; not horizontally scalable; test pollution  
-**Evidence:** `const projects = new Map<string, Project>()` at module level; exported singleton `projectStore`  
-**Remediation:** Encapsulate in a class with explicit lifecycle; inject per-request or per-session context
-
-#### PERF-01: No Parse Tree Caching Implementation
-**Location:** [`src/server/mcp.ts:373-375`](src/server/mcp.ts:373) — `clear_cache` tool returns stub  
-**Impact:** Re-parsing same files on every request; CPU/memory waste  
-**Evidence:** Config mentions `cache.enabled`, `max_size_mb`, `ttl_seconds` but no cache layer in parser/store  
-**Remediation:** Implement LRU cache with TTL in `parseSourceToAST`; integrate with `clear_cache` tool
-
-#### PERF-02: N+1 Parsing in `getProjectOverview`
-**Location:** [`src/server/store.ts:247-296`](src/server/store.ts:247)  
-**Impact:** Re-parses every file in project on each overview call  
-**Evidence:** Loop calls `parseSourceToAST` and `extractSymbolsFromAST` per file without memoization  
-**Remediation:** Cache parsed ASTs and symbol extracts; invalidate on file change
-
-#### PERF-03: O(n²) Similarity Algorithm
-**Location:** [`src/server/similarity.ts:32-83`](src/server/similarity.ts:32)  
-**Impact:** Quadratic complexity for large projects; blocks event loop  
-**Evidence:** `findSimilarCodeBlocks` parses every candidate file and walks entire AST for each snippet  
-**Remediation:** Pre-compute fingerprints; use worker threads; add pagination/streaming
+| ID | Dimensão | Severidade | Achado Principal | Impacto | Probabilidade | Risco Combinado |
+|---|---|---|---|---|---|---|
+| **SEC-01** | Segurança | **CRÍTICA** | Leitura Arbitrária do Filesystem do Host | Alto | Alto | **P0 (Imediato)** |
+| **SEC-02** | Segurança | **CRÍTICA** | Injeção de Comando / Criação de Diretório via Git | Alto | Médio | **P0 (Imediato)** |
+| **SEC-03** | Segurança | **ALTA** | Ausência Total de Autenticação e Autorização | Alto | Alto | **P0 (Imediato)** |
+| **TST-01** | Testes | **CRÍTICA** | Ausência Total de Testes Automatizados (0% Cobertura) | Alto | Alto | **P0 (Imediato)** |
+| **INF-01** | Infra/CI | **ALTA** | Pipeline de CI/CD Desconectado (Configuração Python vs App Node) | Alto | Alto | **P1 (Urgente)** |
+| **PRF-01** | Performance | **ALTA** | Bloqueio do Event Loop por Parsing AST Síncrono | Alto | Médio | **P1 (Urgente)** |
+| **PRF-02** | Performance | **ALTA** | Esgotamento de Memória (Heap OOM) em Store In-Memory | Alto | Médio | **P1 (Urgente)** |
+| **SEC-04** | Segurança | **MÉDIA** | Política de CORS Aberta Globalmente | Médio | Alto | **P1 (Urgente)** |
+| **ARC-01** | Arquitetura | **MÉDIA** | Monólito God File em `server.ts` | Médio | Alto | **P2 (Importante)** |
+| **INF-02** | Infra/Obs | **MÉDIA** | Ausência de Logs Estruturados e Métricas de Observabilidade | Médio | Alto | **P2 (Importante)** |
+| **INF-03** | Infra/Res | **MÉDIA** | Ausência de Graceful Shutdown (Tratamento de SIGTERM/SIGINT) | Médio | Médio | **P2 (Importante)** |
+| **PRF-03** | Performance | **MÉDIA** | Disparo de Requisições Concorrentes sem Cancelamento (`AbortController`) | Médio | Alto | **P2 (Importante)** |
+| **COD-01** | Qualidade | **MÉDIA** | Tratamento Genérico de Exceções (`catch (err: any)`) | Médio | Alto | **P2 (Importante)** |
 
 ---
 
-### 🟡 MEDIUM
+## 3. Achados Detalhados por Dimensão
 
-#### CODE-01: Custom AST Parser Instead of tree-sitter WASM
-**Location:** [`src/server/parser.ts`](src/server/parser.ts:1) — 600+ lines of hand-rolled parsers  
-**Impact:** Incomplete language support; maintenance burden; diverges from real tree-sitter behavior  
-**Evidence:** Regex-based parsing for Python, JS/TS, Go, Rust; no actual tree-sitter integration in TypeScript layer  
-**Remediation:** Migrate to `@tree-sitter/node` or `tree-sitter-language-pack` WASM bindings; remove custom parsers
+### 3.1. Segurança (Security & OWASP Top 10)
 
-#### CODE-02: `any` Type Usage in Public APIs
-**Location:** [`src/server/mcp.ts:200`](src/server/mcp.ts:200), [`src/server/mcp.ts:397`](src/server/mcp.ts:397), [`src/client/types.ts:161`](src/client/types.ts:161)  
-**Impact:** Type safety gaps; runtime errors not caught at compile time  
-**Evidence:** `args: Record<string, any>`, `Promise<any>`, `invokeTool<T = any>`  
-**Remediation:** Define strict input/output types per tool; use `z.infer<typeof schema>` pattern
+#### [SEC-01] Leitura Arbitrária de Arquivos do Host (CWE-22 / OWASP A01:2021)
+- **Localização:** [`server.ts:108-225`](server.ts:108)
+- **Evidência:** O endpoint `POST /api/scan-directory` recebe um parâmetro `dirPath` fornecido pelo cliente e executa `path.resolve(dirPath)` sem verificar se o caminho pertence ao diretório da aplicação. Em seguida, a função `walk` lê recursivamente o conteúdo de até 150 arquivos do sistema operacional e os grava na memória via [`server.ts:209`](server.ts:209) (`fs.readFileSync(item.absolutePath, 'utf-8')`).
+- **Impacto:** Um usuário malicioso ou atacante com acesso de rede à API pode inspecionar diretórios sensíveis do servidor, incluindo chaves privadas, arquivos `.env`, configurações de banco de dados e arquivos de sistema (`/etc/`, `C:\Users\`).
+- **Recomendação:** Restringir o escopo do escaneamento exclusivamente a diretórios dentro de um sandbox pré-definido ou desabilitar o endpoint em ambientes de produção.
 
-#### CODE-03: Error Handling Swallows Context
-**Location:** [`src/server/store.ts:89-91`](src/server/store.ts:89), [`src/server/store.ts:212-214`](src/server/store.ts:212)  
-**Impact:** Silent failures hide bugs; debugging difficult  
-**Evidence:** `catch { /* skip if path violates isolation */ }` with no logging  
-**Remediation:** Log at `warn` level with context; re-throw or return structured error
+#### [SEC-02] Risco de Injeção de Comando e Manipulação de Disco via Git (CWE-78)
+- **Localização:** [`src/server/git.ts:191-202`](src/server/git.ts:191) e [`server.ts:57-62`](server.ts:57)
+- **Evidência:** O endpoint `POST /api/projects/:name/git-init` chama [`src/server/git.ts:191`](src/server/git.ts:191) (`initProjectGitRepo(proj.path)`). A função executa `fs.mkdirSync(normalizedPath, { recursive: true })` e invoca `execSync(\`git init -b ${branchName}\`, { cwd: normalizedPath })`. Como o campo `path` de um projeto pode ser customizado via [`server.ts:65`](server.ts:65), diretórios arbitrários no disco do host podem ser criados e manipulados.
+- **Impacto:** Criação arbitrária de pastas no disco do host e potencial execução de comandos caso parâmetros futuros incluam entrada externa não sanitizada no `execSync`.
+- **Recomendação:** Substituir comandos síncronos de shell por chamadas seguras com array de argumentos (`execFile` ou bibliotecas nativas de Git) e proibir a criação de repositórios fora do diretório de workspace isolado.
 
-#### CODE-04: Console Logging in Production Code
-**Location:** [`src/server/store.ts:112-114`](src/server/store.ts:112), [`server.ts:667-669`](server.ts:667)  
-**Impact:** No structured logging; no log levels; pollutes stdout  
-**Evidence:** `console.log('Code updated, AST ready for inspection')`, `console.log('[MCP Tree-sitter] Server running...')`  
-**Remediation:** Use structured logger (pino/winston) with levels; respect `MCP_TS_LOG_LEVEL`
+#### [SEC-03] Ausência Total de Autenticação e Autorização (OWASP A01:2021 / A07:2021)
+- **Localização:** [`server.ts:35-325`](server.ts:35)
+- **Evidência:** Nenhuma rota sob `/api/*`, `/mcp/*` ou `/mcp/sse` possui middleware de autenticação (JWT, Session, API Key). Métodos destrutivos como `DELETE /api/projects/:name` ([`server.ts:229`](server.ts:229)) e `DELETE /api/projects/:name/file` ([`server.ts:277`](server.ts:277)) estão completamente expostos.
+- **Impacto:** Qualquer agente ou script na rede pode criar, alterar e deletar projetos e arquivos de código sem rastreabilidade.
+- **Recomendação:** Implementar middleware de autenticação e RBAC (*Role-Based Access Control*) antes de liberar acesso aos endpoints.
 
-#### CODE-05: Duplicated Request Handling Pattern
-**Location:** [`server.ts:300-482`](server.ts:300) — 6 endpoints with identical `project+path` → `code+lang` resolution  
-**Impact:** Copy-paste bugs; inconsistent error handling; maintenance overhead  
-**Evidence:** Repeated `if (!source && project && path) { const f = projectStore.getFile... }` blocks  
-**Remediation:** Extract to middleware or helper: `resolveSource(req, res, next)`
-
-#### TEST-01: No Test Files Found in Repository
-**Location:** Repository root  
-**Impact:** Zero test coverage verification; CI cannot validate correctness  
-**Evidence:** `pytest tests` in CI but no `tests/` directory exists in TypeScript codebase  
-**Remediation:** Add Vitest/Jest for TypeScript; target >80% coverage on critical paths (isolation, parsing, MCP tools)
-
-#### TEST-02: CI References Python Tests Not Present
-**Location:** [`.github/workflows/ci.yml:60-61`](.github/workflows/ci.yml:60), [`.github/workflows/ci.yml:73-74`](.github/workflows/ci.yml:73)  
-**Impact:** CI passes vacuously; false confidence  
-**Evidence:** `pytest tests` and `pytest tests/test_diagnostics/` but no Python source in repo  
-**Remediation:** Align CI with actual stack (TypeScript/Node); replace with `vitest run` or `npm test`
-
-#### OPS-01: No Health Check Dependencies
-**Location:** [`server.ts:24-33`](server.ts:24)  
-**Impact:** `/api/health` returns `ok` even if parser, Git, or project store are broken  
-**Evidence:** Health check only returns static JSON with uptime  
-**Remediation:** Add liveness/readiness probes checking: parser init, project store accessible, Git binary present
-
-#### OPS-02: No Structured Logging / Observability
-**Location:** Entire codebase  
-**Impact:** Cannot debug production issues; no correlation IDs; no metrics export  
-**Evidence:** Only `console.log/error`; no request IDs, no OpenTelemetry, no Prometheus metrics  
-**Remediation:** Add pino logger with child loggers per request; expose `/metrics` endpoint; add trace IDs
-
-#### OPS-03: No Graceful Shutdown Handling
-**Location:** [`server.ts:673-676`](server.ts:673)  
-**Impact:** In-flight requests dropped on deploy/scale-down; SSE connections leaked  
-**Evidence:** `process.exit(1)` on startup error only; no `SIGTERM`/`SIGINT` handlers  
-**Remediation:** Add signal handlers; drain HTTP server; close SSE intervals; flush logs
-
-#### OPS-04: Hardcoded Configuration Defaults
-**Location:** [`server.ts:18`](server.ts:18), [`src/server/mcp.ts:378-382`](src/server/mcp.ts:378)  
-**Impact:** Environment-specific config requires code changes; no validation  
-**Evidence:** `PORT=3000`, `cache: { enabled: true, max_size_mb: 100 }` hardcoded  
-**Remediation:** Centralize config with schema validation (Zod); load from env + YAML; fail fast on invalid
-
-#### OPS-05: Missing API Versioning
-**Location:** [`server.ts:520-530`](server.ts:520) — MCP `initialize` returns `protocolVersion: '2024-11-05'`  
-**Impact:** Breaking changes cannot be rolled out safely  
-**Evidence:** No version prefix on REST endpoints (`/api/*`); MCP version fixed  
-**Remediation:** Version REST API (`/api/v1/...`); negotiate MCP protocol version
+#### [SEC-04] Política de CORS Irrestrita (CWE-942)
+- **Localização:** [`server.ts:21`](server.ts:21)
+- **Evidência:** `app.use(cors())` habilita `Access-Control-Allow-Origin: *` para todos os verbos HTTP e origens.
+- **Impacto:** Qualquer site malicioso aberto no navegador do usuário pode enviar requisições à API local (`http://localhost:3000`), exfiltrando projetos e código-fonte.
+- **Recomendação:** Configurar uma lista explícita de origens confiáveis (`allowedOrigins`).
 
 ---
 
-### 🟢 LOW
+### 3.2. Cobertura de Testes (Testing)
 
-#### CODE-06: Dead Code in `store.ts` — Embedded Python/TS/Go/Rust Samples
-**Location:** [`src/server/store.ts:17-208`](src/server/store.ts:17)  
-**Impact:** Bloats bundle; confusing; not used in production  
-**Evidence:** `initDefaultProjects()` creates demo files with hardcoded source strings  
-**Remediation:** Move to test fixtures or separate demo script
-
-#### CODE-07: Inconsistent Naming — `project` vs `name` vs `projectName`
-**Location:** [`src/server/mcp.ts`](src/server/mcp.ts:1) — tool args use `project`, `name`, `projectName` interchangeably  
-**Impact:** Cognitive load; bugs from wrong parameter  
-**Remediation:** Standardize on `projectName` across all tools
-
-#### CODE-08: Magic Numbers in Complexity Calculation
-**Location:** [`src/server/complexity.ts:26`](src/server/complexity.ts:26), [`src/server/complexity.ts:51-63`](src/server/complexity.ts:51)  
-**Impact:** Thresholds not configurable; language-agnostic heuristics  
-**Remediation:** Move thresholds to config; allow per-language tuning
-
-#### DOC-01: Architecture Docs Describe Python Codebase
-**Location:** [`docs/architecture.md`](docs/architecture.md:1)  
-**Impact:** Misleading for TypeScript contributors; references non-existent modules (`bootstrap/`, `di.py`, `config.py`)  
-**Remediation:** Update docs to reflect actual TypeScript architecture
-
-#### DOC-02: No API Documentation for REST Endpoints
-**Location:** [`server.ts`](server.ts:1) — 30+ endpoints undocumented  
-**Impact:** Frontend/backend contract unclear; integration difficult  
-**Remediation:** Add OpenAPI/Swagger spec; generate from route definitions
+#### [TST-01] Ausência Completa de Testes Automatizados
+- **Localização:** [`package.json:6-11`](package.json:6)
+- **Evidência:** O arquivo [`package.json`](package.json) não define script de teste (`"test"`). Não existem diretórios `tests/`, `__tests__/` ou arquivos com terminação `.test.ts` / `.spec.ts` em toda a árvore de código.
+- **Contradição Documental:** O arquivo [`AGENTS.md:23`](AGENTS.md:23) afirma `"pytest tests/ # 217+ tests, must all pass"`, demonstrando que a documentação foi herdada de um projeto upstream e não reflete a realidade do repositório.
+- **Impacto:** Qualquer refatoração ou alteração em regras de parsing, queries sintáticas ou cálculo de complexidade pode introduzir regressões silenciosas sem aviso prévio.
+- **Recomendação:** Configurar o Vitest como framework de testes e implementar testes unitários e de integração para [`src/server/parser.ts`](src/server/parser.ts), [`src/server/queryEngine.ts`](src/server/queryEngine.ts), [`src/server/complexity.ts`](src/server/complexity.ts) e [`src/server/isolation.ts`](src/server/isolation.ts).
 
 ---
 
-## Prioritized Fix Order
+### 3.3. Infraestrutura de Produção & CI/CD (Production Infrastructure)
 
-| Priority | ID | Category | Effort | Risk Reduction |
-|----------|-----|----------|--------|----------------|
-| 1 | SEC-01 | Security | Medium | Critical RCE vector |
-| 2 | SEC-02 | Security | Medium | Full API exposure |
-| 3 | SEC-03 | Security | Low | Filesystem access |
-| 4 | SEC-04 | Security | Low | CSRF/data leak |
-| 5 | SEC-05 | Security | Medium | Input validation |
-| 6 | SEC-06 | Security | Low | DoS protection |
-| 7 | ARCH-01 | Architecture | High | Maintainability |
-| 8 | ARCH-02 | Architecture | Medium | Scalability |
-| 9 | PERF-01 | Performance | Medium | CPU/memory |
-| 10 | PERF-02 | Performance | Low | Latency |
-| 11 | PERF-03 | Performance | High | Scalability |
-| 12 | CODE-01 | Code Quality | High | Correctness |
-| 13 | CODE-02 | Code Quality | Medium | Type safety |
-| 14 | CODE-03 | Code Quality | Low | Debuggability |
-| 15 | CODE-04 | Code Quality | Low | Observability |
-| 16 | CODE-05 | Code Quality | Medium | Maintainability |
-| 17 | TEST-01 | Testing | High | Confidence |
-| 18 | TEST-02 | Testing | Low | CI integrity |
-| 19 | OPS-01 | Operations | Low | Reliability |
-| 20 | OPS-02 | Operations | Medium | Debuggability |
-| 21 | OPS-03 | Operations | Low | Reliability |
-| 22 | OPS-04 | Operations | Low | Config management |
-| 23 | OPS-05 | Operations | Low | API evolution |
-| 24 | CODE-06 | Code Quality | Low | Bundle size |
-| 25 | CODE-07 | Code Quality | Low | Consistency |
-| 26 | CODE-08 | Code Quality | Low | Configurability |
-| 27 | DOC-01 | Documentation | Low | Onboarding |
-| 28 | DOC-02 | Documentation | Medium | Integration |
+#### [INF-01] Pipeline de Integração Contínua Falso/Desconectado
+- **Localização:** [`.github/workflows/ci.yml:1-60`](.github/workflows/ci.yml:1) e [`.github/workflows/release.yml:1-60`](.github/workflows/release.yml:1)
+- **Evidência:** As ações do GitHub configuradas no repositório executam setup de Python 3.12, instalação via `uv` e verificação com `ruff`, `mypy` e `pytest`. Como não existem arquivos Python no projeto, qualquer trigger em push ou PR falha imediatamente.
+- **Impacto:** O repositório não valida TypeScript (`tsc --noEmit`), não valida build de frontend (`vite build`) e não executa linters relevantes em novos commits.
+- **Recomendação:** Substituir os workflows por ações Node.js/TypeScript (Node 20/22, `npm ci`, `npm run lint`, `npm run build` e execução de testes automatizados).
+
+#### [INF-02] Ausência de Logging Estruturado e Métricas
+- **Localização:** [`server.ts:667-675`](server.ts:667)
+- **Evidência:** A aplicação utiliza `console.log` e `console.error` sem formato JSON, sem níveis de log configuráveis (debug, info, warn, error) e sem IDs de correlação de requisição (`correlation-id`).
+- **Impacto:** Impossibilidade de rastrear requisições em ferramentas de agregação de logs (Datadog, Loki, CloudWatch) e incapacidade de monitorar latência e taxas de erro.
+- **Recomendação:** Adotar biblioteca de log estruturado (ex.: Pino) com injeção de `reqId` e exportador de métricas Prometheus/OpenTelemetry.
+
+#### [INF-03] Ausência de Tratamento para Encerramento Gracioso (Graceful Shutdown)
+- **Localização:** [`server.ts:666-671`](server.ts:666)
+- **Evidência:** O servidor inicia o listener HTTP sem registrar ouvintes para os sinais `SIGTERM` e `SIGINT`. Conexões ativas de Server-Sent Events ([`server.ts:633-649`](server.ts:633)) e requisições HTTP em andamento são interrompidas abruptamente em caso de reinicialização ou escalonamento de contêiner.
+- **Impacto:** Queda abrupta de conexões com clientes MCP, corrupção de estado transitório e falha em testes de carga.
+- **Recomendação:** Capturar `SIGTERM` e `SIGINT`, encerrar os intervalos de keepalive das conexões SSE e aguardar o fechamento do servidor HTTP com timeout de drenagem.
 
 ---
 
-## Segregation of Duties — Handoff Plan
+### 3.4. Performance & Escalabilidade
 
-| Finding | Specialist Mode | Verification Mode |
-|---------|-----------------|-------------------|
-| SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06 | Security Reviewer → Backend Specialist (fix) → Security Reviewer (re-verify) |
-| ARCH-01, ARCH-02 | Architect → Software Engineer (refactor) → Code Reviewer |
-| PERF-01, PERF-02, PERF-03 | Backend Specialist → Observability Specialist (metrics) |
-| CODE-01, CODE-02, CODE-03, CODE-04, CODE-05 | TypeScript Specialist → Code Reviewer |
-| TEST-01, TEST-02 | Vitest Test Engineer → Code Reviewer |
-| OPS-01, OPS-02, OPS-03, OPS-04, OPS-05 | Observability Specialist → DevOps |
-| DOC-01, DOC-02 | Documentation Writer → Code Reviewer |
+#### [PRF-01] Bloqueio da Thread Principal por Parsing de Código Síncrono
+- **Localização:** [`server.ts:300-324`](server.ts:300) e [`src/server/parser.ts:54`](src/server/parser.ts:54)
+- **Evidência:** O endpoint `POST /api/ast` invoca [`src/server/parser.ts:54`](src/server/parser.ts:54) (`parseSourceToAST(source, lang)`). O parsing é executado de forma síncrona com múltiplas expressões regulares e loops extensos na thread única do Node.js.
+- **Impacto:** Arquivos grandes (> 500 linhas) ou múltiplas requisições simultâneas bloqueiam o Event Loop, degradando severamente o tempo de resposta e causando congelamento para todos os usuários conectados.
+- **Recomendação:** Delegar o parsing intensivo para Node.js Worker Threads (`worker_threads`) ou adotar o runtime WebAssembly do Tree-sitter (`web-tree-sitter`) com chamadas assíncronas.
+
+#### [PRF-02] Esgotamento de Memória por Armazenamento Global Não Paginado
+- **Localização:** [`src/server/store.ts:6`](src/server/store.ts:6)
+- **Evidência:** `const projects = new Map<string, Project>()` armazena todos os projetos, metadados e conteúdos de arquivos como strings UTF-8 na memória do processo sem limite de tamanho ou política de expiração (LRU).
+- **Impacto:** Projetos importados via `batch-create` ou `scan-directory` podem facilmente exceder o heap disponível do Node.js (V8 max old space), derrubando o processo com erro de OOM (*Out Of Memory*).
+- **Recomendação:** Adotar persistência em disco ou banco relacional com paginação e streaming de arquivos sob demanda.
+
+#### [PRF-03] Rajada de Requisições Concorrentes sem Cancelamento no Cliente
+- **Localização:** [`src/client/App.tsx:182-205`](src/client/App.tsx:182)
+- **Evidência:** A função [`src/client/App.tsx:182`](src/client/App.tsx:182) (`analyzeCode`) dispara três requisições sequenciais (`/api/ast`, `/api/symbols`, `/api/complexity`) a cada alteração de código com debounce de apenas 150ms ([`src/client/App.tsx:104`](src/client/App.tsx:104)), sem utilizar `AbortController`.
+- **Impacto:** Digitação rápida acumula dezenas de requisições obsoletas na fila do servidor, gerando race conditions onde respostas antigas sobrescrevem o estado mais recente no editor.
+- **Recomendação:** Consolidar a análise em um único endpoint (`POST /api/analyze`) e abortar requisições pendentes via `AbortController` a cada novo evento de digitação.
 
 ---
 
-## Compliance Notes
+### 3.5. Arquitetura (Architecture)
 
-- **OWASP Top 10 Coverage:** A01 (Broken Access Control) — SEC-02, SEC-03; A03 (Injection) — SEC-01, SEC-05; A05 (Security Misconfiguration) — SEC-04, SEC-06; A07 (Identification/Authentication Failures) — SEC-02
-- **No SBOM/Dependency Audit Performed** — recommend `npm audit` and `cyclonedx-bom` in CI
-- **No Container Hardening Reviewed** — no `Dockerfile` found; if containerized, review base image, user, capabilities
+#### [ARC-01] Violação de Responsabilidade Única (God File em `server.ts`)
+- **Localização:** [`server.ts:1-677`](server.ts:1)
+- **Evidência:** O arquivo [`server.ts`](server.ts) possui 677 linhas e concentra: inicialização do Express, montagem do middleware Vite, rotas de projetos, leitura do sistema de arquivos do host, integração com Git, endpoints de AST, rotas de similaridade, implementação do protocolo JSON-RPC 2.0 do MCP, streaming Server-Sent Events e tratamento global de erros.
+- **Impacto:** Alto acoplamento, dificuldade de manutenção, baixa testabilidade de rotas isoladas e elevado risco de efeitos colaterais.
+- **Recomendação:** Decompor `server.ts` em roteadores modulares (`src/server/routes/projects.ts`, `src/server/routes/mcp.ts`, `src/server/routes/analysis.ts`).
+
+#### [ARC-02] Simulação Frágil de Tree-sitter via Expressões Regulares
+- **Localização:** [`src/server/parser.ts:54-106`](src/server/parser.ts:54)
+- **Evidência:** Em vez de utilizar as bibliotecas e gramáticas reais do Tree-sitter (como `web-tree-sitter` ou bindings C++), o servidor implementa parsers manuais baseados em regex para Python ([`src/server/parser.ts:108`](src/server/parser.ts:108)), JS/TS, Go e Rust.
+- **Impacto:** Casos sintáticos comuns como strings multilinhas, lambdas aninhadas, macros e type annotations complexas não são interpretados corretamente, gerando nós AST incorretos e consultas S-expression falhas.
+- **Recomendação:** Integrar o Tree-sitter oficial compilado para WebAssembly (`web-tree-sitter`).
 
 ---
 
-## Sign-off
+### 3.6. Qualidade de Código (Code Quality)
 
-This audit report is delivered for stakeholder review. No findings are marked "done" — each requires specialist implementation and independent verification per the handoff plan above.
+#### [COD-01] Tratamento Genérico de Erros e Supressão de Tipagem
+- **Localização:** [`server.ts:102`](server.ts:102), [`server.ts:224`](server.ts:224), [`server.ts:430`](server.ts:430), [`server.ts:623`](server.ts:623)
+- **Evidência:** Uso generalizado de `catch (err: any) { res.status(500).json({ error: err.message }); }`. Erros operacionais (como arquivos não encontrados ou parâmetros inválidos) são indistintamente retornados com código HTTP 500 sem stack trace ou contexto.
+- **Impacto:** Dificuldade de diagnóstico em produção e vazamento de mensagens internas de exceção para o cliente.
+- **Recomendação:** Criar classes de erro customizadas com códigos de status HTTP apropriados (400, 404, 422) e um middleware centralizado de tratamento de erros.
 
-**Next Steps:**
-1. Stakeholder prioritizes top 5 Critical/High items
-2. Orchestrator delegates to specialist modes via `new_task`
-3. Each fix verified by independent reviewer before merge
-4. Re-audit after Critical/High remediation complete
+#### [COD-02] Risco de ReDoS e Loop no Tokenizer de Query S-Expression
+- **Localização:** [`src/server/queryEngine.ts:46-56`](src/server/queryEngine.ts:46)
+- **Evidência:** O parser de strings de consulta percorre caracteres com `while (idx < working.length && working[idx] !== '"')`. Em caso de string com aspas sem fechamento, o índice atinge o limite e realiza `idx++`, provocando inconsistências no array de tokens.
+- **Impacto:** Possibilidade de congelamento do parser ou geração de tokens corrompidos com entrada de usuário malformada.
+- **Recomendação:** Validar o fechamento de literais de string antes da tokenização e impor limite de tamanho para consultas.
+
+---
+
+## 4. Plano de Ação Recomendado (Roadmap de Remediação)
+
+### Fase 1: Bloqueios Críticos de Segurança e CI (Sprint 1)
+1. **[SEC-01]** Isolar e restringir a rota `POST /api/scan-directory` para não ler diretórios externos do sistema operacional.
+2. **[SEC-02]** Remover a execução direta de comandos shell via `execSync` em [`src/server/git.ts`](src/server/git.ts).
+3. **[SEC-03]** Implementar autenticação básica ou token bearer nos endpoints da API.
+4. **[INF-01]** Reconfigurar o workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) para ambiente Node.js/TypeScript.
+
+### Fase 2: Confiabilidade e Testes (Sprint 2)
+1. **[TST-01]** Configurar Vitest e criar suíte de testes com cobertura mínima de 80% nos módulos [`src/server/parser.ts`](src/server/parser.ts), [`src/server/queryEngine.ts`](src/server/queryEngine.ts) e [`src/server/isolation.ts`](src/server/isolation.ts).
+2. **[PRF-01]** Mover a execução de parsing de código para Worker Threads ou WebAssembly para liberar o Event Loop.
+3. **[PRF-03]** Unificar as requisições de análise do editor em [`src/client/App.tsx`](src/client/App.tsx) com `AbortController`.
+
+### Fase 3: Arquitetura e Observabilidade (Sprint 3)
+1. **[ARC-01]** Modularizar [`server.ts`](server.ts) em roteadores dedicados.
+2. **[INF-02]** Integrar logger estruturado Pino com identificadores únicos de requisição.
+3. **[INF-03]** Adicionar tratamento para os sinais `SIGTERM` e `SIGINT` no servidor.
+4. **[PRF-02]** Implementar política de expiração de memória (LRU Cache) para o [`src/server/store.ts`](src/server/store.ts).
+
+---
+
+## 5. Parecer de Prontidão
+
+> **PARECER FINAL: REPROVADO PARA PRODUÇÃO**  
+> A aplicação **não atende** aos requisitos mínimos de segurança, qualidade, testabilidade e estabilidade para operação em produção. A liberação para deploy deve permanecer **bloqueada** até que todos os itens de severidade **CRÍTICA** e **ALTA** (P0 e P1) sejam devidamente remediados e validados por suíte de testes automatizada.
